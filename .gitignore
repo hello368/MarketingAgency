@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Environment & secrets — NEVER commit these
+.env
+*.env
+credentials.json
+service-account.json
+tracker/credentials.json
+tracker/service-account.json
+tracker/credentials/
+
+# Runtime data
+data/
+tracker/data/
+*.db
+*.sqlite
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

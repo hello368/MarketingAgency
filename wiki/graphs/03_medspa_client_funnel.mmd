@@ -1,0 +1,80 @@
+flowchart TD
+    subgraph AWARENESS["🌐 AWARENESS — Meta Ads"]
+        A1["Instagram Reel Ad<br/>Hook: 'Before/After'<br/>Treatment Demo"]
+        A2["Facebook Feed Ad<br/>Hook: 'Offer'<br/>'Free Consultation'"]
+        A3["Story Ad<br/>Hook: 'Social Proof'<br/>Client Testimonial"]
+    end
+
+    subgraph LEAD["📋 LEAD CAPTURE — Meta Lead Form"]
+        B["Instant Lead Form<br/>━━━━━━━━━━━━━━━<br/>Full Name<br/>Email · Phone<br/>Treatment Interest<br/>Best Time to Call"]
+    end
+
+    subgraph NURTURE["💬 NURTURE — GoHighLevel Automation"]
+        C1["⚡ T+0 min<br/>SMS: Personalized<br/>Treatment Message"]
+        C2["T+1 hour<br/>Email: Before/After Gallery<br/>+ Booking Link"]
+        C3["T+24 hrs<br/>SMS Follow-up<br/>'Did you get a chance to...?'"]
+        C4["T+3 days<br/>SMS: Urgency<br/>'This week only...'"]
+    end
+
+    subgraph BOOK["📅 APPOINTMENT — GHL Calendar"]
+        D["Appointment Booked<br/>━━━━━━━━━━━━━━━<br/>Treatment Confirmed<br/>Deposit Collected<br/>Reminder Set"]
+    end
+
+    subgraph OPTIMIZE["🔄 OPTIMIZATION — Meta CAPI"]
+        E["Schedule Event → CAPI<br/>Meta learns 'Bookers'<br/>Lookalike Audience Built"]
+    end
+
+    subgraph SHOW["🏥 SHOW — Clinic Visit"]
+        F1["Reminder SMS -24hrs"]
+        F2["Reminder SMS -2hrs"]
+        F3["Client Arrives<br/>Treatment Delivered"]
+    end
+
+    subgraph RETAIN["⭐ RETENTION — GHL Automation"]
+        G1["Post-Visit Review<br/>Request SMS"]
+        G2["30-Day Follow-up<br/>Next Treatment Offer"]
+        G3["Referral Ask<br/>'Bring a Friend' Offer"]
+    end
+
+    subgraph METRICS["📊 KPI TRACKING"]
+        M1["CPL — Cost per Lead<br/>Target: < $15"]
+        M2["CPB — Cost per Booking<br/>Target: < $80"]
+        M3["Show Rate<br/>Target: > 70%"]
+        M4["Close Rate<br/>Target: > 60%"]
+        M5["LTV — Lifetime Value<br/>Target: > $1,200"]
+    end
+
+    A1 --> B
+    A2 --> B
+    A3 --> B
+    B --> C1
+    C1 --> C2
+    C2 --> C3
+    C3 --> C4
+    C1 --> D
+    C2 --> D
+    C3 --> D
+    C4 --> D
+    D --> E
+    E -.->|"Algorithm Feedback Loop"| AWARENESS
+    D --> F1
+    F1 --> F2
+    F2 --> F3
+    F3 --> G1
+    G1 --> G2
+    G2 --> G3
+
+    B -.->|"Track"| M1
+    D -.->|"Track"| M2
+    F3 -.->|"Track"| M3
+    F3 -.->|"Track"| M4
+    G2 -.->|"Track"| M5
+
+    style AWARENESS fill:#0d1b2a,stroke:#2244aa,color:#cce
+    style LEAD fill:#1a2b0d,stroke:#44aa22,color:#cec
+    style NURTURE fill:#2b1a0d,stroke:#aa6622,color:#edc
+    style BOOK fill:#0d2b2b,stroke:#22aaaa,color:#cee
+    style OPTIMIZE fill:#2b0d2b,stroke:#aa22aa,color:#ece
+    style SHOW fill:#2b2b0d,stroke:#aaaa22,color:#eec
+    style RETAIN fill:#0d2b1a,stroke:#22aa66,color:#cee
+    style METRICS fill:#1a1a1a,stroke:#666,color:#aaa

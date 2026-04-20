@@ -1,0 +1,56 @@
+graph LR
+    subgraph TRAFFIC["🎯 TRAFFIC LAYER"]
+        META["Meta Ads Manager<br/>─────────────<br/>Campaigns / Ad Sets / Ads<br/>Lead Form · Retargeting"]
+    end
+
+    subgraph BRIDGE["⚡ AUTOMATION BRIDGE<br/>(ghl_meta_bridge.py · FastAPI)"]
+        WH1["/webhook/meta-lead<br/>Lead Sync"]
+        WH2["/webhook/ghl-booking<br/>Booking CAPI"]
+        SCHED["APScheduler<br/>Daily 08:00 UTC"]
+        DB[(SQLite DB<br/>leads · bookings)]
+        WH1 --> DB
+        WH2 --> DB
+        SCHED --> DB
+    end
+
+    subgraph CRM["🏥 CRM LAYER"]
+        GHL["GoHighLevel<br/>─────────────<br/>Contacts · Pipeline<br/>Appointments · Workflows<br/>SMS / Email / Reviews"]
+    end
+
+    subgraph AI["🤖 AI LAYER"]
+        CLAUDE["Claude API<br/>Ad Copy · Analysis<br/>Insight Summaries"]
+        CONTENT["Content Harvester<br/>TikTok · IG · FB<br/>Hook & Visual Analysis"]
+    end
+
+    subgraph REPORT["📊 REPORTING LAYER"]
+        INSIGHTS["Meta Insights API<br/>Spend · CPL · ROAS"]
+        DASH["Daily Dashboard<br/>CPB · Show Rate · CVR"]
+        TG["Telegram Bot<br/>Daily · Weekly · Monthly"]
+    end
+
+    subgraph CAPI["🔄 CONVERSION API"]
+        PIXEL["Meta Pixel<br/>+ Conversions API<br/>Schedule Event"]
+    end
+
+    META -- "Lead Webhook<br/>(real-time)" --> WH1
+    WH1 -- "Create Contact<br/>+ Attribution Fields" --> GHL
+    GHL -- "Appointment<br/>Webhook" --> WH2
+    WH2 -- "SHA-256 Hashed<br/>User Data" --> PIXEL
+    PIXEL -- "Algorithm<br/>Optimization" --> META
+
+    SCHED -- "Pull Insights" --> INSIGHTS
+    SCHED -- "Pull Bookings" --> GHL
+    INSIGHTS --> DASH
+    DASH --> TG
+    DASH -- "Weekly Analysis<br/>Prompt" --> CLAUDE
+    CLAUDE -- "Insight Report" --> TG
+
+    CONTENT -- "Trending Hooks" --> CLAUDE
+    CLAUDE -- "Ad Copy Drafts" --> META
+
+    style BRIDGE fill:#1a1a2e,color:#e0e0ff,stroke:#4444aa
+    style TRAFFIC fill:#0d1b2a,color:#e0e0ff,stroke:#2244aa
+    style CRM fill:#0d2b1a,color:#e0e0ff,stroke:#22aa44
+    style AI fill:#2b1a0d,color:#e0e0ff,stroke:#aa6622
+    style REPORT fill:#1a0d2b,color:#e0e0ff,stroke:#8822aa
+    style CAPI fill:#2b0d1a,color:#e0e0ff,stroke:#aa2244

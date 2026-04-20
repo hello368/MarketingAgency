@@ -1,0 +1,38 @@
+gantt
+    title AI MedSpa Agency — 90일 런치 타임라인
+    dateFormat  YYYY-MM-DD
+    axisFormat  %m/%d
+
+    section 🔧 Phase 1 — 시스템 빌드 (Day 1-30)
+    .env 설정 + 서버 실행              :crit, p1a, 2026-04-16, 2d
+    GHL 커스텀 필드 8개 생성          :crit, p1b, after p1a, 1d
+    Meta App Webhook 등록             :crit, p1c, after p1b, 1d
+    GHL Booking Webhook 등록          :crit, p1d, after p1c, 1d
+    CAPI event_id 버그 수정            :crit, p1e, after p1d, 2d
+    fbclid 캡처 로직 추가              :p1f, after p1e, 2d
+    GHL 4대 워크플로우 설치           :p1g, after p1f, 3d
+    MedSpa Snapshot 완성              :p1h, after p1g, 5d
+    /admin/health 검증 + 테스트       :p1i, after p1h, 2d
+    Beta 클라이언트 1개 유치 (반값)   :p1j, 2026-04-25, 10d
+
+    section 📦 Phase 2 — 상품화 (Day 31-60)
+    Snapshot 패키지화 (SaaS Mode)     :p2a, 2026-05-16, 5d
+    판매 페이지 제작                  :p2b, after p2a, 5d
+    Paid Discovery 오퍼 ($997) 셋업   :p2c, after p2b, 3d
+    케이스 스터디 초안 작성           :p2d, after p2c, 3d
+    CAPI EMQ 7.0+ 달성 확인          :p2e, 2026-05-20, 5d
+    주간 AI 리포트 자동화 테스트      :p2f, after p2e, 5d
+    Telegram 일일 대시보드 검증       :p2g, after p2f, 3d
+
+    section 🚀 Phase 3 — 클라이언트 3개 (Day 61-90)
+    콜드 아웃리치 시작 (IG DM 50개/일):p3a, 2026-06-15, 5d
+    Discovery Call 10개 목표          :p3b, after p3a, 7d
+    클라이언트 2번째 온보딩           :p3c, after p3b, 3d
+    클라이언트 3번째 온보딩           :p3d, after p3c, 3d
+    MRR $4,500+ 달성                  :milestone, p3e, after p3d, 0d
+
+    section 📈 Phase 4 — 스케일 (Month 4+)
+    Make.com CAPI 고도화              :p4a, 2026-07-15, 10d
+    Claude API 주간 리포트 연동       :p4b, after p4a, 7d
+    GHL SaaS Mode Snapshot 외부 판매  :p4c, after p4b, 5d
+    클라이언트 10개 MRR $25,000 목표  :milestone, p4d, 2026-10-01, 0d

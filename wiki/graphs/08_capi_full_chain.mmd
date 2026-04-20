@@ -1,0 +1,54 @@
+sequenceDiagram
+    autonumber
+    participant U as 👤 Prospect
+    participant LP as 🌐 Landing Page
+    participant PX as 🔵 Browser Pixel
+    participant GHL as 🏥 GoHighLevel
+    participant BRIDGE as ⚡ Bridge Server
+    participant CAPI as 🔄 Meta CAPI
+    participant META as 📱 Meta Algorithm
+
+    rect rgb(13, 27, 42)
+        Note over U,PX: ━━━ STEP 1: 광고 클릭 — fbclid 캡처 ━━━
+        U->>LP: 광고 클릭<br/>URL: ?fbclid=AbCdEf123
+        LP->>LP: JS: fbclid 파라미터 추출<br/>fbp 쿠키 자동 설정
+        LP->>GHL: GHL Hidden Field에 fbclid 저장<br/>(커스텀 필드: meta_fbclid)
+        Note over LP: fbclid = 이후 모든 CAPI 이벤트의 핵심 키
+    end
+
+    rect rgb(13, 43, 26)
+        Note over U,CAPI: ━━━ STEP 2: 리드폼 제출 — Lead 이벤트 (중복 제거) ━━━
+        U->>LP: 리드폼 제출 (이름, 이메일, 전화, 시술)
+        LP->>PX: fbq('track', 'Lead', {}, {eventID: 'evt_LEAD_12345'})
+        Note over PX: Browser Pixel fires (클라이언트 사이드)
+        LP->>GHL: Contact 생성 + 커스텀 필드 저장
+        GHL->>BRIDGE: Webhook: Contact Created
+        BRIDGE->>CAPI: POST /events<br/>event_name: "Lead"<br/>event_id: "evt_LEAD_12345" ← 중복 제거 키<br/>fbc: "fb.1.{timestamp}.AbCdEf123"<br/>SHA-256: {email, phone, name}
+        CAPI-->>META: 중복 제거 후 1회만 카운트<br/>(event_id 매칭)
+        GHL->>U: ⚡ 즉시 SMS (< 2분)
+    end
+
+    rect rgb(43, 13, 26)
+        Note over U,CAPI: ━━━ STEP 3: 예약 완료 — Schedule 이벤트 ━━━
+        U->>GHL: 예약 완료 (캘린더 링크 클릭)
+        GHL->>BRIDGE: Webhook: AppointmentCreated<br/>{contactId, appointmentId, calendarTitle}
+        BRIDGE->>BRIDGE: SQLite에서 meta 정보 조회<br/>(email, phone, fbclid 포함)
+        BRIDGE->>CAPI: POST /events<br/>event_name: "Schedule"<br/>fbc: "fb.1.{timestamp}.AbCdEf123" ← fbclid 포함<br/>custom_data: {value: [시술단가], treatment_type}<br/>action_source: "crm"
+        CAPI-->>META: 📈 "예약하는 유저" 패턴 학습
+    end
+
+    rect rgb(13, 26, 43)
+        Note over GHL,CAPI: ━━━ STEP 4: 방문 완료 — AppointmentShowed 이벤트 ━━━
+        GHL->>BRIDGE: Manual trigger: Stage → "방문 완료"
+        BRIDGE->>CAPI: POST /events<br/>event_name: "AppointmentShowed" (custom)<br/>action_source: "crm"
+    end
+
+    rect rgb(26, 43, 13)
+        Note over GHL,META: ━━━ STEP 5: 결제 완료 — Purchase 이벤트 ━━━
+        GHL->>BRIDGE: Webhook: Order/Payment Complete
+        BRIDGE->>CAPI: POST /events<br/>event_name: "Purchase"<br/>action_source: "physical_store"<br/>custom_data: {value: [실제 결제액], currency: "USD"}
+        CAPI-->>META: 🎯 최고 가치 신호<br/>"결제하는 유저" 룩어라이크 생성
+        META-->>META: CPB 20-40% 개선<br/>다음 캠페인 최적화 완료
+    end
+
+    Note over U,META: 📊 EMQ 목표: Lead 8.0+ / Schedule 8.5+ / Purchase 8.8~9.3

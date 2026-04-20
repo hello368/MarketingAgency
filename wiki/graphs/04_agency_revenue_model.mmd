@@ -1,0 +1,49 @@
+graph TD
+    subgraph CLIENTS["👥 CLIENT TIERS"]
+        C1["Tier 1: Starter<br/>$1,500/mo<br/>Ad Spend: $1k-$3k<br/>1 location"]
+        C2["Tier 2: Growth<br/>$2,500/mo<br/>Ad Spend: $3k-$8k<br/>1-2 locations"]
+        C3["Tier 3: Scale<br/>$4,000/mo<br/>Ad Spend: $8k-$20k<br/>Multi-location"]
+    end
+
+    subgraph REVENUE["💰 REVENUE STREAMS"]
+        R1["Retainer Fee<br/>━━━━━━━━━━━━<br/>Setup: $2,000-$3,000 (one-time)<br/>Monthly: $1,500-$4,000"]
+        R2["Ad Spend %<br/>━━━━━━━━━━━━<br/>15-20% of managed spend<br/>Min: $500/mo"]
+        R3["Performance Bonus<br/>━━━━━━━━━━━━<br/>$20-$50 per booked<br/>appointment above threshold"]
+        R4["Productized Services<br/>━━━━━━━━━━━━<br/>GHL Snapshot: $997<br/>AI Creative Pack: $500<br/>White-label Reports: $300"]
+    end
+
+    subgraph SCALE["📈 SCALE MATH (10 clients)"]
+        S1["10 × $2,500 retainer<br/>= $25,000/mo base"]
+        S2["10 × $5k spend × 17%<br/>= $8,500/mo performance"]
+        S3["10 × 20 bookings × $25<br/>= $5,000/mo bonus"]
+        S4["TOTAL MRR: ~$38,500<br/>ARR: ~$462,000"]
+    end
+
+    subgraph LEVERAGE["⚡ AI AUTOMATION LEVERAGE"]
+        L1["Traditional Agency<br/>━━━━━━━━━━━━<br/>1 AM per 5 clients<br/>40h manual/client/mo<br/>Max: $150k ARR per AM"]
+        L2["AI Automation Agency<br/>━━━━━━━━━━━━<br/>1 AM per 20+ clients<br/>8h AI-assisted/client/mo<br/>Max: $600k+ ARR per AM"]
+        L3["4x LEVERAGE<br/>via Automation"]
+    end
+
+    C1 --> R1
+    C2 --> R1
+    C3 --> R1
+    C1 --> R2
+    C2 --> R2
+    C3 --> R2
+    C2 --> R3
+    C3 --> R3
+    R1 --> S1
+    R2 --> S2
+    R3 --> S3
+    S1 --> S4
+    S2 --> S4
+    S3 --> S4
+
+    L1 --> L3
+    L2 --> L3
+
+    style CLIENTS fill:#0d1b2a,stroke:#2244aa,color:#cce
+    style REVENUE fill:#1a0d2b,stroke:#8822aa,color:#dce
+    style SCALE fill:#0d2b1a,stroke:#22aa44,color:#cec
+    style LEVERAGE fill:#2b1a0d,stroke:#aa6622,color:#edc

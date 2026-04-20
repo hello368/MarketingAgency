@@ -1,0 +1,41 @@
+sequenceDiagram
+    autonumber
+    participant U as 👤 Prospect
+    participant META as 📱 Meta Ads
+    participant BRIDGE as ⚡ Bridge Server
+    participant GHL as 🏥 GoHighLevel
+    participant CAPI as 🔄 Meta CAPI
+    participant TG as 📲 Telegram
+
+    rect rgb(13, 27, 42)
+        Note over U,GHL: ━━━ FLOW 1: Lead Acquisition (Target: < 5 min) ━━━
+        U->>META: Fills Lead Form<br/>(name, email, phone, treatment)
+        META->>BRIDGE: Webhook: leadgen event<br/>{ lead_id, ad_id, campaign_id }
+        BRIDGE->>META: GET /v19.0/{lead_id}<br/>Fetch full field_data
+        META-->>BRIDGE: Lead detail + attribution
+        BRIDGE->>GHL: POST /contacts/<br/>{ contact + custom fields }
+        GHL-->>BRIDGE: { contact_id }
+        BRIDGE->>BRIDGE: Save to SQLite<br/>(lead ↔ meta attribution)
+        GHL->>U: ⚡ Instant SMS (< 2 min)<br/>"Hi [Name], saw you're interested in [Treatment]..."
+    end
+
+    rect rgb(13, 43, 26)
+        Note over U,CAPI: ━━━ FLOW 2: Booking Conversion + CAPI Optimization ━━━
+        U->>GHL: Books Appointment<br/>(via SMS link or call)
+        GHL->>BRIDGE: Webhook: AppointmentCreated<br/>{ appointment_id, contact_id }
+        BRIDGE->>BRIDGE: Lookup meta_lead_id<br/>from SQLite by contact_id
+        BRIDGE->>CAPI: POST /{pixel_id}/events<br/>event_name: "Schedule"<br/>SHA-256 hashed user data
+        CAPI-->>META: Algorithm learns<br/>"booking-intent" users
+        Note over META: 📈 Meta now targets<br/>lookalikes who BOOK,<br/>not just submit forms
+    end
+
+    rect rgb(43, 13, 43)
+        Note over BRIDGE,TG: ━━━ FLOW 3: Daily Performance Dashboard (08:00 UTC) ━━━
+        BRIDGE->>META: GET /insights<br/>spend, leads, CPL by campaign
+        META-->>BRIDGE: Yesterday's metrics
+        BRIDGE->>GHL: GET /contacts (yesterday)
+        BRIDGE->>GHL: GET /appointments (yesterday)
+        GHL-->>BRIDGE: Contact count + Booking count
+        BRIDGE->>BRIDGE: Calculate KPIs:<br/>CPL · CPB · CVR · ROAS
+        BRIDGE->>TG: 📊 Daily Report<br/>Spend · Leads · Bookings · CPB
+    end
