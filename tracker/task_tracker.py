@@ -447,11 +447,6 @@ def check_and_fire_nag_alerts() -> None:
             text = _NAG_L2.format(name=assignee)
         else:
             text = _NAG_L3.format(name=assignee)
-            # Escalate to Michael via Telegram as well
-            tg_text = _NAG_L3_TELEGRAM.format(
-                name=assignee, space=space_name, thread=thread_id
-            )
-            telegram_bot.send_alert("Michael", tg_text)
 
         try:
             gchat_sender.reply_to_thread(space_name, thread_id, text)
@@ -462,6 +457,18 @@ def check_and_fire_nag_alerts() -> None:
             )
         except Exception as e:
             log.error("[TaskTracker] Nag alert failed (L%d, %s): %s", level, assignee, e)
+            continue
+
+        # L3: Telegram escalation to Michael — runs after mark so a Telegram
+        # failure never causes the level to re-fire on the next scheduler tick.
+        if level == 3:
+            try:
+                tg_text = _NAG_L3_TELEGRAM.format(
+                    name=assignee, space=space_name, thread=thread_id
+                )
+                telegram_bot.send_alert("Michael", tg_text)
+            except Exception as tg_err:
+                log.warning("[TaskTracker] L3 Telegram alert failed: %s", tg_err)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
