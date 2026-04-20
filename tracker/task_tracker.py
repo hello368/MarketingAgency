@@ -150,19 +150,76 @@ def _extract_urls(text: str) -> list[str]:
 
 
 def _parse_attachments(attachments: list[dict]) -> list[str]:
-    """Convert Google Chat attachment objects to human-readable strings."""
+    """
+    Extract viewable URLs from Google Chat attachment objects.
+
+    Priority order per attachment:
+      1. driveDataRef.driveFileId  → Drive view URL
+      2. downloadUri               → direct download link (uploaded files)
+      3. thumbnailUri              → thumbnail/preview link (images)
+      4. attachmentDataRef.resourceName → resource path (no direct URL available)
+      5. contentName alone         → filename logged, no URL
+    """
     parts = []
     for att in attachments:
-        name     = att.get("contentName", "")
-        drive_id = att.get("driveDataRef", {}).get("driveFileId", "")
+        name         = att.get("contentName", "")
+        drive_id     = att.get("driveDataRef", {}).get("driveFileId", "")
+        download_uri = att.get("downloadUri", "")
+        thumbnail    = att.get("thumbnailUri", "")
+        resource     = att.get("attachmentDataRef", {}).get("resourceName", "")
+
         if drive_id:
-            parts.append(f"{name} (https://drive.google.com/file/d/{drive_id})")
+            url = f"https://drive.google.com/file/d/{drive_id}/view"
+            parts.append(f"{name} ({url})" if name else url)
+        elif download_uri:
+            parts.append(f"{name} ({download_uri})" if name else download_uri)
+        elif thumbnail:
+            parts.append(f"{name} ({thumbnail})" if name else thumbnail)
+        elif resource:
+            parts.append(f"{name} [attached: {resource}]" if name else resource)
         elif name:
-            parts.append(name)
+            parts.append(f"{name} [no URL]")
+
     return parts
 
 
 _SKIP_SYMBOLS = frozenset({"-", "."})
+
+
+def _strip_all_mentions(text: str, all_display_names: list[str]) -> str:
+    """
+    Remove every mention form from text before content parsing.
+
+    Handles three formats Google Chat uses:
+      1. <users/123456789>      — bracket ID mention
+      2. @FirstName LastName    — @ token where full name follows (split by space)
+      3. @FirstName             — @ token with only first name (surname already gone
+                                  or single-word name)
+
+    Strategy for multi-word names (e.g. "Michael Kay"):
+      Build pattern  @Michael(?:\\s+Kay)?  so both "@Michael Kay" and a
+      lone "@Michael" are consumed, leaving no orphan surname.
+    """
+    # Pass 1: bracket mentions  <users/...>
+    text = re.sub(r"<users/[^>]+>", "", text)
+
+    # Pass 2: @ + display name (handles split surnames)
+    for name in all_display_names:
+        if not name:
+            continue
+        words = name.split()
+        if len(words) >= 2:
+            first   = re.escape(words[0])
+            rest    = r"\s+".join(re.escape(w) for w in words[1:])
+            pattern = r"@" + first + r"(?:\s+" + rest + r")?"
+        else:
+            pattern = r"@" + re.escape(words[0])
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+
+    # Pass 3: any remaining @token (catches @best or unknown names)
+    text = re.sub(r"@\S+", "", text)
+
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _parse_task_text(text: str, mentions: list[dict]) -> dict:
@@ -191,7 +248,9 @@ def _parse_task_text(text: str, mentions: list[dict]) -> dict:
         if m["display_name"].lower() != BOT_DISPLAY_NAME.lower()
     ]
 
-    clean         = re.sub(r"@\S+", "", text).strip()
+    # Strip ALL mention forms before parsing — includes bot + every assignee name
+    all_names = [m["display_name"] for m in mentions]
+    clean     = _strip_all_mentions(text, all_names)
     urls          = _extract_urls(clean)
     clean_no_urls = re.sub(r"https?://[^\s]+", "", clean).strip()
     words         = clean_no_urls.split()
