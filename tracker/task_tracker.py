@@ -64,10 +64,10 @@ _TASK_HEADERS = [
     # Columns J onwards are dynamically populated — one URL per cell, no limit
 ]
 
-# Fixed column letters (A–I are always stable)
-_COL_STATUS       = "G"   # 7
-_COL_COMPLETED_AT = "I"   # 9
-_URL_START_COL    = 9     # 0-based index of column J
+# Fallback column letters if headers are not found in the sheet
+_COL_STATUS_DEFAULT       = "G"
+_COL_COMPLETED_AT_DEFAULT = "I"
+_URL_START_COL            = 9     # 0-based index of column J
 
 
 def _col_letter(zero_based_index: int) -> str:
@@ -146,11 +146,48 @@ def _get_worksheet() -> gspread.Worksheet:
         return ws
 
 
+def _find_header_cols(ws: gspread.Worksheet) -> tuple[str, str]:
+    """
+    Scan row 1 and return (status_col_letter, completed_at_col_letter).
+    Falls back to hardcoded defaults if headers are not found.
+    """
+    headers = ws.row_values(1)
+    status_col = completed_col = None
+    for i, h in enumerate(headers):
+        h_norm = h.strip().lower()
+        if h_norm == "status":
+            status_col = _col_letter(i)
+        elif h_norm in ("completed at", "completedat"):
+            completed_col = _col_letter(i)
+    status_col   = status_col   or _COL_STATUS_DEFAULT
+    completed_col = completed_col or _COL_COMPLETED_AT_DEFAULT
+    log.info("[TaskTracker] Header scan → status=%s completed_at=%s", status_col, completed_col)
+    return status_col, completed_col
+
+
 def _find_task_row(ws: gspread.Worksheet, thread_id: str) -> int | None:
-    """One API call; safe for thread IDs containing '/' characters."""
-    for i, row in enumerate(ws.get_all_values()[1:], start=2):
-        if len(row) > 1 and row[1] == thread_id:
+    """
+    Find the sheet row whose Thread ID column (B) matches thread_id.
+    Tries exact match first, then suffix match to handle format variations.
+    """
+    if not thread_id:
+        log.warning("[TaskTracker] _find_task_row called with empty thread_id")
+        return None
+    all_rows = ws.get_all_values()
+    for i, row in enumerate(all_rows[1:], start=2):
+        if len(row) < 2 or not row[1]:
+            continue
+        stored = row[1]
+        if stored == thread_id:
+            log.info("[TaskTracker] Thread match (exact) row=%d %s", i, stored)
             return i
+        # Suffix match: covers 'spaces/X/threads/Y' vs 'threads/Y' discrepancies
+        if thread_id.endswith(stored) or stored.endswith(thread_id):
+            log.info("[TaskTracker] Thread match (suffix) row=%d stored=%s received=%s",
+                     i, stored, thread_id)
+            return i
+    log.warning("[TaskTracker] No row found for thread_id=%s (sheet has %d data rows)",
+                thread_id, len(all_rows) - 1)
     return None
 
 
@@ -504,18 +541,21 @@ def handle_task_event(
 
     # ── Scenario A: Task Completion ───────────────────────────────────────────
     if _is_completion(text):
+        log.info("[TaskTracker] Scenario A — thread_id=%s sender=%s url_list=%s",
+                 thread_id, sender_name, url_list)
+
         row_idx = _find_task_row(ws, thread_id)
 
-        log.info("[TaskTracker] Scenario A — closing url_list=%s", url_list)
-
         if row_idx is None:
-            log.info("[TaskTracker] Completion signal — no open task for thread %s", thread_id)
+            log.warning("[TaskTracker] Completion signal — no matching row for thread '%s'", thread_id)
             return {
                 "text": (
                     f"✅ *{sender_name}* marked this as complete.\n"
                     "_(No open task was found for this thread — sheet not updated.)_"
                 )
             }
+
+        col_status, col_completed = _find_header_cols(ws)
 
         try:
             # Find the first empty column in this row from J onwards,
@@ -526,8 +566,8 @@ def handle_task_event(
                 start_col += 1
 
             updates = [
-                {"range": f"{_COL_STATUS}{row_idx}",       "values": [["✅ Completed"]]},
-                {"range": f"{_COL_COMPLETED_AT}{row_idx}", "values": [[now_str]]},
+                {"range": f"{col_status}{row_idx}",    "values": [["✅ Completed"]]},
+                {"range": f"{col_completed}{row_idx}", "values": [[now_str]]},
             ]
             for i, url in enumerate(url_list):
                 updates.append({
