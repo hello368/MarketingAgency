@@ -90,18 +90,30 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS task_nag_timers (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at   TEXT    NOT NULL,
-            thread_id    TEXT    NOT NULL,
-            space_name   TEXT    NOT NULL,
-            assignee     TEXT    NOT NULL,
-            nag_level    INTEGER DEFAULT 0,
-            acknowledged INTEGER DEFAULT 0,
-            deadline_l1  TEXT    NOT NULL,
-            deadline_l2  TEXT    NOT NULL,
-            deadline_l3  TEXT    NOT NULL
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at       TEXT    NOT NULL,
+            thread_id        TEXT    NOT NULL,
+            space_name       TEXT    NOT NULL,
+            assignee         TEXT    NOT NULL,
+            nag_level        INTEGER DEFAULT 0,
+            acknowledged     INTEGER DEFAULT 0,
+            deadline_l1      TEXT    NOT NULL,
+            deadline_l2      TEXT    NOT NULL,
+            deadline_l3      TEXT    NOT NULL,
+            client           TEXT    DEFAULT '',
+            city             TEXT    DEFAULT '',
+            task_description TEXT    DEFAULT ''
         );
     """)
+
+    # Migrate existing task_nag_timers table — add task detail columns if absent
+    for col in ("client TEXT DEFAULT ''", "city TEXT DEFAULT ''", "task_description TEXT DEFAULT ''"):
+        col_name = col.split()[0]
+        try:
+            con.execute(f"ALTER TABLE task_nag_timers ADD COLUMN {col}")
+            log.info("Migration: added column %s to task_nag_timers", col_name)
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     # Pre-populate team members (INSERT OR IGNORE = safe to re-run)
     for name, info in TEAM_MEMBERS.items():
@@ -337,14 +349,18 @@ def log_ping(member_name: str, reason: str, space_name: str, thread_key: str):
 def create_task_nag_timer(
     thread_id: str, space_name: str, assignee: str,
     deadline_l1: str, deadline_l2: str, deadline_l3: str,
+    client: str = "", city: str = "", task_description: str = "",
 ) -> int:
     con = get_conn()
     cur = con.execute(
         """INSERT INTO task_nag_timers
-           (created_at, thread_id, space_name, assignee, deadline_l1, deadline_l2, deadline_l3)
-           VALUES (?,?,?,?,?,?,?)""",
+           (created_at, thread_id, space_name, assignee,
+            deadline_l1, deadline_l2, deadline_l3,
+            client, city, task_description)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (datetime.now(TZ).isoformat(), thread_id, space_name, assignee,
-         deadline_l1, deadline_l2, deadline_l3),
+         deadline_l1, deadline_l2, deadline_l3,
+         client, city, task_description),
     )
     timer_id = cur.lastrowid
     con.commit()

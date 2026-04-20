@@ -87,25 +87,35 @@ _NEGATIONS     = ("not ", "haven't ", "isn't ", "wasn't ", "no ", "never ")
 # Nag alert templates (Business English — these are sent to Google Chat)
 _NAG_L1 = (
     "📋 *Task Acknowledgment Required*\n"
-    "Hi *{name}*, this task has been open for 15 minutes without a response. "
+    "Hi *{name}*, this task: *[{client} / {city}]* - _{description}_ "
+    "has been open for 15 minutes without a response. "
     "Please acknowledge to confirm you have received it and meet our SLA.\n"
     "— MARTS Tracker"
 )
 _NAG_L2 = (
     "⚠️ *[Urgent] Task Overdue — 30 Minutes Elapsed*\n"
-    "*{name}*, 30 minutes have passed without any acknowledgment or update on this task. "
+    "*{name}*, this task: *[{client} / {city}]* - _{description}_ "
+    "has been open for 30 minutes without any acknowledgment or update. "
     "Please respond immediately to avoid further escalation.\n"
     "— MARTS Tracker"
 )
+_NAG_L2_TELEGRAM = (
+    "⚠️ [Urgent] {client} / {city} - {description} is overdue!\n"
+    "Hi {name}, this task has been open for 30 minutes with no response. "
+    "Please reply immediately in the Google Chat thread."
+)
 _NAG_L3 = (
     "🚨 *[Final Escalation] Task Unacknowledged — 45 Minutes*\n"
-    "*{name}* has not responded after 45 minutes. "
-    "*Michael* — manual intervention is required on this task.\n"
+    "*{name}* has not responded after 45 minutes.\n"
+    "Task: *{client} / {city}* — _{description}_\n"
+    "*Michael* — manual intervention is required.\n"
     "— MARTS Tracker"
 )
 _NAG_L3_TELEGRAM = (
     "🚨 [FINAL ESCALATION]\n"
-    "{name} is still unresponsive after 45 min on a task in '{space}'.\n"
+    "{name} is still unresponsive after 45 min.\n"
+    "Task: {client} / {city} - {description}\n"
+    "Space: {space}\n"
     "Thread: {thread}\n"
     "Manual intervention required."
 )
@@ -436,17 +446,21 @@ def process_task_message(event: dict) -> dict | None:
 # ── Nag timer helpers ─────────────────────────────────────────────────────────
 
 def create_nag_timers(
-    thread_id: str, space_name: str, assignees: list[str], now: datetime
+    thread_id: str, space_name: str, assignees: list[str], now: datetime,
+    client: str = "", city: str = "", description: str = "",
 ) -> None:
     """Create one nag timer row per assignee in SQLite."""
     l1 = (now + timedelta(seconds=NAG_L1_SECONDS)).isoformat()
     l2 = (now + timedelta(seconds=NAG_L2_SECONDS)).isoformat()
     l3 = (now + timedelta(seconds=NAG_L3_SECONDS)).isoformat()
     for assignee in assignees:
-        db.create_task_nag_timer(thread_id, space_name, assignee, l1, l2, l3)
+        db.create_task_nag_timer(
+            thread_id, space_name, assignee, l1, l2, l3,
+            client=client, city=city, task_description=description,
+        )
         log.info(
-            "[TaskTracker] Nag timer created — assignee=%s L1=%s L2=%s L3=%s",
-            assignee, l1, l2, l3,
+            "[TaskTracker] Nag timer created — assignee=%s client=%s city=%s L1=%s L2=%s L3=%s",
+            assignee, client, city, l1, l2, l3,
         )
 
 
@@ -478,12 +492,16 @@ def check_and_fire_nag_alerts() -> None:
         level      = timer["nag_level"]  # next level to fire
         timer_id   = timer["id"]
 
+        client      = timer.get("client", "") or "General"
+        city        = timer.get("city", "") or "General"
+        description = timer.get("task_description", "") or "—"
+
         if level == 1:
-            text = _NAG_L1.format(name=assignee)
+            text = _NAG_L1.format(name=assignee, client=client, city=city, description=description)
         elif level == 2:
-            text = _NAG_L2.format(name=assignee)
+            text = _NAG_L2.format(name=assignee, client=client, city=city, description=description)
         else:
-            text = _NAG_L3.format(name=assignee)
+            text = _NAG_L3.format(name=assignee, client=client, city=city, description=description)
 
         try:
             gchat_sender.reply_to_thread(space_name, thread_id, text)
@@ -496,12 +514,24 @@ def check_and_fire_nag_alerts() -> None:
             log.error("[TaskTracker] Nag alert failed (L%d, %s): %s", level, assignee, e)
             continue
 
+        # L2: Telegram DM to assignee — runs after GChat send and mark so a
+        # Telegram failure never blocks escalation or causes re-fire.
+        if level == 2:
+            try:
+                tg_text = _NAG_L2_TELEGRAM.format(
+                    name=assignee, client=client, city=city, description=description
+                )
+                telegram_bot.send_alert(assignee, tg_text)
+            except Exception as tg_err:
+                log.warning("[TaskTracker] L2 Telegram alert failed for %s: %s", assignee, tg_err)
+
         # L3: Telegram escalation to Michael — runs after mark so a Telegram
         # failure never causes the level to re-fire on the next scheduler tick.
         if level == 3:
             try:
                 tg_text = _NAG_L3_TELEGRAM.format(
-                    name=assignee, space=space_name, thread=thread_id
+                    name=assignee, client=client, city=city, description=description,
+                    space=space_name, thread=thread_id,
                 )
                 telegram_bot.send_alert("Michael", tg_text)
             except Exception as tg_err:
@@ -548,6 +578,7 @@ def handle_task_event(
 
         if row_idx is None:
             log.warning("[TaskTracker] Completion signal — no matching row for thread '%s'", thread_id)
+            close_nag_timers(thread_id)
             return {
                 "text": (
                     f"✅ *{sender_name}* marked this as complete.\n"
@@ -634,7 +665,10 @@ def handle_task_event(
         log.error("[TaskTracker] append_row failed: %s", e)
         return None
 
-    create_nag_timers(thread_id, space_name, assignees, now)
+    create_nag_timers(
+        thread_id, space_name, assignees, now,
+        client=parsed["client"], city=parsed["city"], description=parsed["description"],
+    )
 
     desc_preview  = parsed["description"][:100] + ("…" if len(parsed["description"]) > 100 else "")
     assets_preview = "\n".join(url_list) if url_list else "—"
