@@ -362,9 +362,9 @@ def get_expired_nag_timers(now_iso: str) -> list[sqlite3.Row]:
     rows = con.execute(
         """SELECT *,
                CASE
-                 WHEN nag_level < 3 AND deadline_l3 <= :now THEN 3
-                 WHEN nag_level < 2 AND deadline_l2 <= :now THEN 2
                  WHEN nag_level < 1 AND deadline_l1 <= :now THEN 1
+                 WHEN nag_level < 2 AND deadline_l2 <= :now THEN 2
+                 WHEN nag_level < 3 AND deadline_l3 <= :now THEN 3
                  ELSE 0
                END AS next_level
            FROM task_nag_timers
