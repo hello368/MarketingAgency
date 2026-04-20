@@ -65,6 +65,6 @@ SLA_SECONDS = 15          # ← TESTING: set to 900 for production
 # Testing : 15s / 30s / 45s
 # Production: 900s (15m) / 1800s (30m) / 2700s (45m)
 # ─────────────────────────────────────────
-NAG_L1_SECONDS = 15   # ← TESTING: set to 900  for production
-NAG_L2_SECONDS = 30   # ← TESTING: set to 1800 for production
-NAG_L3_SECONDS = 45   # ← TESTING: set to 2700 for production
+NAG_L1_SECONDS = 900   # 15 min
+NAG_L2_SECONDS = 1800  # 30 min
+NAG_L3_SECONDS = 2700  # 45 min
