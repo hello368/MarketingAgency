@@ -59,7 +59,6 @@ def reply_to_thread(space_name: str, thread_name: str, text: str) -> dict:
     payload = {
         "text": text,
         "thread": {"name": thread_name},
-        "messageReplyOption": "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
     }
     with httpx.Client(timeout=15) as client:
         resp = client.post(

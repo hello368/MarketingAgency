@@ -350,11 +350,22 @@ def _handle_message(body: dict) -> None:
     is_eod_thread = eod_thread_key and thread_key == eod_thread_key
 
     if is_checkin_space and is_eod_window and is_eod_thread and matched_name:
-        links    = parse_eod_links(text)
+        text_links   = parse_eod_links(text)
+        attachments  = message.get("attachment") or message.get("attachments") or []
+        attach_urls  = [
+            url for att in attachments
+            for url in (
+                [f"https://drive.google.com/file/d/{att.get('driveDataRef', {}).get('driveFileId', '')}/view"]
+                if att.get("driveDataRef", {}).get("driveFileId")
+                else [att.get("downloadUri", "")] if att.get("downloadUri")
+                else []
+            )
+        ]
+        links    = text_links + [u for u in attach_urls if u]
         time_str = now_local.strftime("%H:%M:%S")
         db.log_eod(today, matched_name, time_str, links, text)
         sheets_client.log_eod(today, matched_name, time_str, links)
-        log.info("[EOD] ✅ %s — %d link(s)", matched_name, len(links))
+        log.info("[EOD] ✅ %s — %d link(s) (%d from attachments)", matched_name, len(links), len(attach_urls))
         return
 
     # ── [4] SLA: resolve existing timer if tagged person replies

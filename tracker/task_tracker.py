@@ -39,12 +39,12 @@ from google.oauth2.service_account import Credentials
 import db
 import telegram_bot
 import gchat_sender
-from config import TIMEZONE, NAG_L1_SECONDS, NAG_L2_SECONDS, NAG_L3_SECONDS
+from config import NAG_L1_SECONDS, NAG_L2_SECONDS, NAG_L3_SECONDS
 
 load_dotenv(Path(__file__).parent / ".env")
 
 log = logging.getLogger(__name__)
-TZ  = ZoneInfo(TIMEZONE)
+TZ  = ZoneInfo("America/Los_Angeles")  # PST/PDT — San Francisco
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 BOT_DISPLAY_NAME = os.getenv("BOT_DISPLAY_NAME", "best")
@@ -60,13 +60,24 @@ TAB_TASKS     = "Task_Tracker"
 _TASK_HEADERS = [
     "Date", "Thread ID", "Client", "City",
     "Task Description", "Assignee(s)", "Status", "Requested At",
-    "Completed At", "Reference Links", "Final Assets",
+    "Completed At",
+    # Columns J onwards are dynamically populated — one URL per cell, no limit
 ]
 
-# Columns for batch_update on completion
+# Fixed column letters (A–I are always stable)
 _COL_STATUS       = "G"   # 7
 _COL_COMPLETED_AT = "I"   # 9
-_COL_FINAL_ASSETS = "K"   # 11
+_URL_START_COL    = 9     # 0-based index of column J
+
+
+def _col_letter(zero_based_index: int) -> str:
+    """Convert a 0-based column index to a spreadsheet letter (e.g. 9 → 'J', 35 → 'AJ')."""
+    result = ""
+    n = zero_based_index + 1  # 1-based
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        result = chr(65 + rem) + result
+    return result
 
 # Positive completion keywords (English only — no Korean in source strings)
 _DONE_KEYWORDS = frozenset(["done", "completed", "finished", "complete", "closed"])
@@ -118,7 +129,7 @@ def _get_worksheet() -> gspread.Worksheet:
             ws = _spreadsheet.worksheet(TAB_TASKS)
         except gspread.WorksheetNotFound:
             ws = _spreadsheet.add_worksheet(
-                title=TAB_TASKS, rows=2000, cols=len(_TASK_HEADERS)
+                title=TAB_TASKS, rows=2000, cols=50  # 50 cols = A–AX, plenty for dynamic URL columns
             )
             ws.append_row(_TASK_HEADERS, value_input_option="USER_ENTERED")
             ws.format(
@@ -151,36 +162,37 @@ def _extract_urls(text: str) -> list[str]:
 
 def _parse_attachments(attachments: list[dict]) -> list[str]:
     """
-    Extract viewable URLs from Google Chat attachment objects.
+    Extract clean, clickable URLs from Google Chat attachment objects.
+    Returns plain URLs only — no filenames or parentheses.
 
-    Priority order per attachment:
-      1. driveDataRef.driveFileId  → Drive view URL
+    Priority per attachment:
+      1. driveDataRef.driveFileId  → permanent Drive view URL
       2. downloadUri               → direct download link (uploaded files)
-      3. thumbnailUri              → thumbnail/preview link (images)
-      4. attachmentDataRef.resourceName → resource path (no direct URL available)
-      5. contentName alone         → filename logged, no URL
+      3. thumbnailUri              → image preview (fallback)
     """
-    parts = []
-    for att in attachments:
-        name         = att.get("contentName", "")
+    urls = []
+    for i, att in enumerate(attachments):
+        log.info("[TaskTracker] attachment[%d] full object: %s", i, att)
+
         drive_id     = att.get("driveDataRef", {}).get("driveFileId", "")
         download_uri = att.get("downloadUri", "")
         thumbnail    = att.get("thumbnailUri", "")
-        resource     = att.get("attachmentDataRef", {}).get("resourceName", "")
 
         if drive_id:
             url = f"https://drive.google.com/file/d/{drive_id}/view"
-            parts.append(f"{name} ({url})" if name else url)
+            urls.append(url)
+            log.info("[TaskTracker] attachment[%d] → Drive: %s", i, url)
         elif download_uri:
-            parts.append(f"{name} ({download_uri})" if name else download_uri)
+            urls.append(download_uri)
+            log.info("[TaskTracker] attachment[%d] → download: %s", i, download_uri[:120])
         elif thumbnail:
-            parts.append(f"{name} ({thumbnail})" if name else thumbnail)
-        elif resource:
-            parts.append(f"{name} [attached: {resource}]" if name else resource)
-        elif name:
-            parts.append(f"{name} [no URL]")
+            urls.append(thumbnail)
+            log.info("[TaskTracker] attachment[%d] → thumbnail: %s", i, thumbnail[:120])
+        else:
+            log.warning("[TaskTracker] attachment[%d] → no URL found. keys=%s", i, sorted(att.keys()))
 
-    return parts
+    log.info("[TaskTracker] _parse_attachments → %d URL(s): %s", len(urls), urls)
+    return urls
 
 
 _SKIP_SYMBOLS = frozenset({"-", "."})
@@ -316,15 +328,37 @@ def _extract_mentions_from_message(message: dict) -> list[dict]:
 
 # ── Primary entry point (called from main.py) ────────────────────────────────
 
+def _collect_attachments(event: dict, message: dict) -> list[dict]:
+    """
+    Google Chat delivers attachment data under several different keys
+    depending on the integration type (Chat App vs Workspace Add-on).
+    Try every known location so nothing is silently dropped.
+    """
+    candidates = (
+        message.get("attachment")                                        # Chat App (singular)
+        or message.get("attachments")                                    # legacy / some Add-ons
+        or event.get("attachment")                                       # top-level (rare)
+        or event.get("attachments")                                      # top-level plural
+        or event.get("chat", {}).get("messagePayload", {})
+                   .get("message", {}).get("attachment")                 # raw Add-on path
+        or []
+    )
+    if candidates:
+        log.info("[TaskTracker] attachments found (%d items) — keys: %s",
+                 len(candidates),
+                 [sorted(a.keys()) for a in candidates[:3]])
+    else:
+        log.info("[TaskTracker] NO attachments found — event keys=%s | message keys=%s",
+                 sorted(event.keys()), sorted(message.keys()))
+    return candidates
+
+
 def process_task_message(event: dict) -> dict | None:
     """
     Primary entry point for main.py's _handle_message().
 
-    Extracts all required fields from the raw Google Chat event and delegates
-    to handle_task_event().  Returns dict {"text": <reply>} if the message is
-    a task event (new task or completion), None otherwise.
-
-    Call this BEFORE check-in / EOD / SLA logic so task events get priority.
+    Builds combined_assets (text URLs + attachment URLs) here so the
+    combination is explicit and testable before being passed to handle_task_event.
     """
     message     = event.get("message", {})
     sender      = message.get("sender", {})
@@ -335,14 +369,30 @@ def process_task_message(event: dict) -> dict | None:
     if sender_type == "BOT":
         return None
 
+    text            = message.get("text", "").strip()
+    raw_attachments = _collect_attachments(event, message)
+
+    # ── Build ordered URL list: text links first, then attachment links ───────
+    text_urls   = _extract_urls(text)
+    attach_urls = _parse_attachments(raw_attachments)
+    url_list    = text_urls + attach_urls
+
+    log.info(
+        "[TaskTracker] URL list — text=%d %s | attach=%d %s | total=%d",
+        len(text_urls), text_urls[:3],
+        len(attach_urls), attach_urls[:3],
+        len(url_list),
+    )
+
     return handle_task_event(
-        text        = message.get("text", "").strip(),
-        thread_id   = thread.get("name", ""),
-        space_name  = space.get("name", ""),
-        sender_name = sender.get("displayName", ""),
-        mentions    = _extract_mentions_from_message(message),
-        attachments = message.get("attachments", []),
-        now         = datetime.now(TZ),
+        text       = text,
+        thread_id  = thread.get("name", ""),
+        space_name = space.get("name", ""),
+        sender_name= sender.get("displayName", ""),
+        mentions   = _extract_mentions_from_message(message),
+        attachments= raw_attachments,
+        url_list   = url_list,
+        now        = datetime.now(TZ),
     )
 
 
@@ -424,6 +474,7 @@ def handle_task_event(
     sender_name: str,
     mentions: list[dict],
     attachments: list[dict],
+    url_list: list[str],
     now: datetime,
 ) -> dict | None:
     """
@@ -448,7 +499,7 @@ def handle_task_event(
     if _is_completion(text):
         row_idx = _find_task_row(ws, thread_id)
 
-        closing_assets = ", ".join(_extract_urls(text) + _parse_attachments(attachments)) or "—"
+        log.info("[TaskTracker] Scenario A — closing url_list=%s", url_list)
 
         if row_idx is None:
             log.info("[TaskTracker] Completion signal — no open task for thread %s", thread_id)
@@ -460,17 +511,27 @@ def handle_task_event(
             }
 
         try:
-            ws.batch_update(
-                [
-                    {"range": f"{_COL_STATUS}{row_idx}",       "values": [["✅ Completed"]]},
-                    {"range": f"{_COL_COMPLETED_AT}{row_idx}", "values": [[now_str]]},
-                    {"range": f"{_COL_FINAL_ASSETS}{row_idx}", "values": [[closing_assets]]},
-                ],
-                value_input_option="USER_ENTERED",
-            )
+            # Find the first empty column in this row from J onwards,
+            # so closing URLs don't overwrite existing reference links.
+            row_data   = ws.row_values(row_idx)
+            start_col  = _URL_START_COL
+            while start_col < len(row_data) and row_data[start_col]:
+                start_col += 1
+
+            updates = [
+                {"range": f"{_COL_STATUS}{row_idx}",       "values": [["✅ Completed"]]},
+                {"range": f"{_COL_COMPLETED_AT}{row_idx}", "values": [[now_str]]},
+            ]
+            for i, url in enumerate(url_list):
+                updates.append({
+                    "range":  f"{_col_letter(start_col + i)}{row_idx}",
+                    "values": [[url]],
+                })
+
+            ws.batch_update(updates, value_input_option="USER_ENTERED")
             log.info(
-                "[TaskTracker] Task closed — row=%d thread=%s by=%s",
-                row_idx, thread_id, sender_name,
+                "[TaskTracker] Task closed — row=%d thread=%s by=%s closing_urls=%d",
+                row_idx, thread_id, sender_name, len(url_list),
             )
         except Exception as e:
             log.error("[TaskTracker] batch_update failed (row=%d): %s", row_idx, e)
@@ -478,12 +539,13 @@ def handle_task_event(
 
         close_nag_timers(thread_id)
 
+        assets_preview = "\n".join(url_list) if url_list else "—"
         return {
             "text": (
                 f"✅ *Task Completed!*\n"
                 f"👤 Closed by: *{sender_name}*\n"
                 f"🕐 Completed at: {now_str}\n"
-                f"📎 Final assets: {closing_assets}"
+                f"📎 Final assets ({len(url_list)}):\n{assets_preview}"
             )
         }
 
@@ -498,25 +560,28 @@ def handle_task_event(
         log.debug("[TaskTracker] @best triggered but no assignees found")
         return None
 
-    attachment_strs = _parse_attachments(attachments)
-    all_assets      = ", ".join(filter(None, [parsed["assets"]] + attachment_strs)) or "—"
-    assignee_str    = ", ".join(assignees)
+    assignee_str = ", ".join(assignees)
 
+    log.info(
+        "[TaskTracker] Scenario B — %d URL(s) → cols J+ : %s",
+        len(url_list), url_list,
+    )
+
+    # Fixed cols A–I, then one URL per cell from J onwards (no limit)
     new_row = [
         date_str, thread_id,
         parsed["client"], parsed["city"], parsed["description"],
         assignee_str,
         "🏃 In Progress", now_str,
-        "",          # Completed At
-        all_assets,  # Reference Links
-        "",          # Final Assets
+        "",          # Completed At (col I)
+        *url_list,   # cols J, K, L, … — one clean URL each
     ]
 
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
         log.info(
-            "[TaskTracker] Task created — client=%s city=%s assignees=%s thread=%s",
-            parsed["client"], parsed["city"], assignee_str, thread_id,
+            "[TaskTracker] Task created — client=%s city=%s assignees=%s urls=%d thread=%s",
+            parsed["client"], parsed["city"], assignee_str, len(url_list), thread_id,
         )
     except Exception as e:
         log.error("[TaskTracker] append_row failed: %s", e)
@@ -524,13 +589,14 @@ def handle_task_event(
 
     create_nag_timers(thread_id, space_name, assignees, now)
 
-    desc_preview = parsed["description"][:100] + ("…" if len(parsed["description"]) > 100 else "")
+    desc_preview  = parsed["description"][:100] + ("…" if len(parsed["description"]) > 100 else "")
+    assets_preview = "\n".join(url_list) if url_list else "—"
     return {
         "text": (
             f"📝 *Task registered under [{parsed['client']}] / [{parsed['city']}]*\n"
             f"👤 Assigned to: *{assignee_str}*\n"
             f"📋 _{desc_preview}_\n"
-            f"📎 Reference assets archived: {all_assets}\n"
+            f"📎 {len(url_list)} link(s) archived:\n{assets_preview}\n"
             f"⏱️ SLA timer started: {now_str}\n\n"
             "_Reply *done* or *completed* in this thread to close the task._"
         )
