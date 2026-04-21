@@ -171,6 +171,11 @@ class GHLClient:
                 {"key": "meta_form_id",     "field_value": data.get("meta_form_id", "")},
                 {"key": "meta_lead_id",     "field_value": data.get("meta_lead_id", "")},
                 {"key": "treatment",        "field_value": data.get("treatment", "")},
+                # BUG-M02 FIX: store fbclid/fbc/fbp in GHL so booking webhook can pass
+                # them to CAPI even if the lead row is retrieved days later.
+                {"key": "meta_fbclid",      "field_value": data.get("fbclid", "")},
+                {"key": "meta_fbc",         "field_value": data.get("fbc", "")},
+                {"key": "meta_fbp",         "field_value": data.get("fbp", "")},
             ],
             "source": "Meta Lead Ad",
             "tags": ["meta-lead", data.get("treatment", "").lower().replace(" ", "-")],
@@ -416,14 +421,27 @@ async def process_ghl_booking(appointment_id: str, contact_id: str, treatment: s
                 "phone":      lead["phone"],
                 "first_name": lead["first_name"],
                 "last_name":  lead["last_name"],
-                "fbc":        lead.get("meta_fbc", ""),   # BUG-M02 FIX
-                "fbp":        lead.get("meta_fbp", ""),   # BUG-M02 FIX
+                "fbc":        lead.get("meta_fbc", ""),
+                "fbp":        lead.get("meta_fbp", ""),
             }
-            custom_data = {
-                "value": 150.00,       # 평균 예약 가치 (클라이언트별 조정)
-                "currency": "USD",
-                "treatment_type": treatment or lead.get("treatment", ""),
-            }
+            treatment_key = (treatment or lead.get("treatment", "")).lower().replace(" ", "")
+            _mapped_value = TREATMENT_VALUES.get(treatment_key)
+            if _mapped_value is None:
+                log.warning(
+                    "[CAPI] Unknown treatment %r — omitting value from CAPI event. "
+                    "Add to TREATMENT_VALUES to enable accurate ROAS.",
+                    treatment_key or "(empty)",
+                )
+                custom_data = {
+                    "currency": "USD",
+                    "treatment_type": treatment or lead.get("treatment", ""),
+                }
+            else:
+                custom_data = {
+                    "value": float(_mapped_value),
+                    "currency": "USD",
+                    "treatment_type": treatment or lead.get("treatment", ""),
+                }
 
             result = await meta.send_capi_event("Schedule", contact, custom_data)
             capi_sent = 1 if result.get("events_received", 0) > 0 else 0
