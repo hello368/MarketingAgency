@@ -10,11 +10,11 @@ import os
 
 from openai import OpenAI
 
+from config import MODEL_FAST, MODEL_SMART
+
 log = logging.getLogger(__name__)
 
-_OR_BASE     = "https://openrouter.ai/api/v1"
-_MODEL_FAST  = "anthropic/claude-3.5-haiku"       # lightweight tasks: update summary, check
-_MODEL_SMART = "anthropic/claude-3.5-sonnet"       # reasoning-heavy tasks: ask (RAG), brief
+_OR_BASE = "https://openrouter.ai/api/v1"
 
 
 def _get_client() -> OpenAI | None:
@@ -28,7 +28,7 @@ def _get_client() -> OpenAI | None:
 def _call(
     prompt: str,
     system: str = "",
-    model: str = _MODEL_FAST,
+    model: str = MODEL_FAST,
     max_tokens: int = 512,
 ) -> str:
     """Shared OpenRouter call. Returns empty string on failure."""
@@ -65,7 +65,7 @@ def summarize_update(content: str) -> tuple[str, str]:
 
 Update: {content}"""
 
-    raw = _call(prompt, system=system, model=_MODEL_FAST, max_tokens=256)
+    raw = _call(prompt, system=system, model=MODEL_FAST, max_tokens=256)
     try:
         data = json.loads(raw)
         summary = str(data.get("summary", "")).strip() or " ".join(content.split()[:5])
@@ -110,12 +110,18 @@ def answer_rag(question: str, rows: list[dict]) -> str:
 
 Provide a clear, detailed answer. Cite specific records where relevant."""
 
-    result = _call(prompt, system=system, model=_MODEL_SMART, max_tokens=800)
+    result = _call(prompt, system=system, model=MODEL_SMART, max_tokens=800)
     return result or "Sorry, failed to generate an answer."
 
 
 def generate_brief(updates: list[dict], tasks: list[dict]) -> str:
     """Generate a daily briefing from today's/yesterday's Update_Tracker + Task_Tracker data."""
+    if not updates and not tasks:
+        return (
+            "No data to brief yet.\n"
+            "Log updates first with `@best update [content]`."
+        )
+
     u_lines = "\n".join(
         f"• [{r.get('space_name', '')}] {r.get('summary', '')} — {r.get('context', '')}"
         for r in updates[:20]
@@ -144,5 +150,21 @@ Write in the following format, under 200 words:
 *✅ Task Status*
 • (2-3 progress items)"""
 
-    result = _call(prompt, system=system, model=_MODEL_SMART, max_tokens=600)
-    return result or "Failed to generate briefing."
+    client = _get_client()
+    if not client:
+        return "⚠️ LLM unavailable (OPENROUTER_API_KEY not set)."
+    try:
+        msgs: list[dict] = [
+            {"role": "system", "content": system},
+            {"role": "user",   "content": prompt},
+        ]
+        resp = client.chat.completions.create(
+            model=MODEL_SMART,
+            messages=msgs,
+            max_tokens=600,
+            temperature=0.3,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as exc:
+        log.warning("[LLM] generate_brief failed — model=%s %s: %s", MODEL_SMART, type(exc).__name__, exc)
+        return f"⚠️ Failed to generate briefing ({type(exc).__name__})."

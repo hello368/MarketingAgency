@@ -70,6 +70,14 @@ NAG_L2_SECONDS = int(os.getenv("NAG_L2_SECONDS", "1800"))  # 30 min
 NAG_L3_SECONDS = int(os.getenv("NAG_L3_SECONDS", "2700"))  # 45 min
 
 # ─────────────────────────────────────────
+# LLM MODEL NAMES (override via env var)
+# Fast: lightweight tasks (update summary, check)
+# Smart: reasoning-heavy tasks (ask RAG, brief)
+# ─────────────────────────────────────────
+MODEL_FAST  = os.getenv("MODEL_FAST",  "anthropic/claude-3.5-haiku")
+MODEL_SMART = os.getenv("MODEL_SMART", "anthropic/claude-3.5-sonnet")
+
+# ─────────────────────────────────────────
 # BRAIN WIKI — Google Sheet Tab Names
 # ─────────────────────────────────────────
 TAB_CLIENT_WIKI = "Client_Wiki"

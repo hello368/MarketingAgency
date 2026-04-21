@@ -116,7 +116,7 @@ def _get_updates_by_space(space_id: str) -> list[dict]:
     """Return all Update_Tracker rows for the given space ID."""
     try:
         ws   = _get_or_create_tab(TAB_UPDATES, _UPD_HEADERS)
-        rows = ws.get_all_records()
+        rows = ws.get_all_records(expected_headers=list(_UPD_HEADERS))
         return [
             {
                 "timestamp":        r.get("날짜/시간", ""),
@@ -140,7 +140,7 @@ def _get_recent_records(today: str, yesterday: str) -> tuple[list[dict], list[di
 
     try:
         ws = _get_or_create_tab(TAB_UPDATES, _UPD_HEADERS)
-        for r in ws.get_all_records():
+        for r in ws.get_all_records(expected_headers=list(_UPD_HEADERS)):
             if str(r.get("날짜/시간", ""))[:10] in (today, yesterday):
                 updates.append({
                     "timestamp":  r.get("날짜/시간", ""),
@@ -153,7 +153,7 @@ def _get_recent_records(today: str, yesterday: str) -> tuple[list[dict], list[di
 
     try:
         ws = _get_or_create_tab(TAB_TASKS, _TASK_HEADERS)
-        for r in ws.get_all_records():
+        for r in ws.get_all_records(expected_headers=list(_TASK_HEADERS)):
             if str(r.get("날짜/시간", ""))[:10] in (today, yesterday):
                 tasks.append({
                     "timestamp": r.get("날짜/시간", ""),
@@ -200,7 +200,7 @@ def _get_tasks_for(assignee_raw: str) -> list[dict]:
     """Return active tasks assigned to the given person."""
     try:
         ws   = _get_or_create_tab(TAB_TASKS, _TASK_HEADERS)
-        rows = ws.get_all_records()
+        rows = ws.get_all_records(expected_headers=list(_TASK_HEADERS))
         name = assignee_raw.lstrip("@").strip().lower()
         return [
             r for r in rows
