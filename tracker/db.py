@@ -6,7 +6,7 @@ import os
 import time
 import sqlite3
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from threading import Lock
 from zoneinfo import ZoneInfo
 from config import TEAM_MEMBERS, TIMEZONE
@@ -645,36 +645,81 @@ def set_sla_enabled(space_name: str, enabled: bool) -> bool:
 
 # ─────────────────────────────────────────
 # _find_task_row match statistics
+# In-memory counter cache (same pattern as touch_space).
+# Flushed every 30s by the lifespan flush loop + at shutdown.
 # ─────────────────────────────────────────
 
+_find_row_cache: dict[tuple[str, int], int] = {}
+_find_row_lock = Lock()
+
+
 def record_find_task_row_match(strategy: int) -> None:
-    """Record a match (or no-match with strategy=0) for today.
-    strategy: 0 = no match, 1-6 = matched strategy number.
+    """Increment in-memory counter. strategy=0 means no match, 1-6 = strategy number.
+    Flushed to SQLite by flush_find_row_cache() every 30s.
     """
     from datetime import date as _date
     today = _date.today().isoformat()
+    with _find_row_lock:
+        key = (today, strategy)
+        _find_row_cache[key] = _find_row_cache.get(key, 0) + 1
+
+
+def flush_find_row_cache() -> int:
+    """Drain in-memory counters to find_task_row_stats. Returns total events written."""
+    with _find_row_lock:
+        snapshot = dict(_find_row_cache)
+        _find_row_cache.clear()
+    if not snapshot:
+        return 0
     con = get_conn()
-    con.execute(
+    con.executemany(
         """INSERT INTO find_task_row_stats (date, strategy, count)
-           VALUES (?, ?, 1)
-           ON CONFLICT(date, strategy) DO UPDATE SET count = count + 1""",
-        (today, strategy),
+           VALUES (?, ?, ?)
+           ON CONFLICT(date, strategy) DO UPDATE SET count = count + excluded.count""",
+        [(date_str, strategy, cnt) for (date_str, strategy), cnt in snapshot.items()],
     )
     con.commit()
     con.close()
+    return sum(snapshot.values())
 
 
-def get_find_task_row_stats(days: int = 14) -> list[sqlite3.Row]:
-    """Return per-(date, strategy) counts for the last N days."""
+def get_find_task_row_stats(days: int = 30) -> dict:
+    """Return aggregated match stats for the last N days as a formatted summary dict."""
     con = get_conn()
     rows = con.execute(
-        """SELECT date, strategy, count FROM find_task_row_stats
+        """SELECT strategy, SUM(count) AS total
+           FROM find_task_row_stats
            WHERE date >= date('now', ?)
-           ORDER BY date DESC, strategy""",
+           GROUP BY strategy""",
         (f"-{days} days",),
     ).fetchall()
     con.close()
-    return rows
+
+    total_calls = 0
+    no_match = 0
+    by_strategy: dict[str, int] = {}
+
+    for row in rows:
+        s = row["strategy"]
+        c = row["total"]
+        total_calls += c
+        if s == 0:
+            no_match = c
+        else:
+            by_strategy[str(s)] = c
+
+    result: dict = {
+        "period_days": days,
+        "total_calls": total_calls,
+        "no_match": no_match,
+        "by_strategy": {},
+    }
+    for s_key in sorted(by_strategy, key=int):
+        count = by_strategy[s_key]
+        pct = round(count / total_calls * 100, 1) if total_calls else 0.0
+        result["by_strategy"][s_key] = {"count": count, "pct": pct}
+
+    return result
 
 
 def flush_touch_cache() -> int:

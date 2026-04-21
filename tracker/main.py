@@ -113,8 +113,8 @@ async def lifespan(app: FastAPI):
             log.error("[Wiki] ❌ Startup failed: %s", exc)
 
     # ── Provision Sheets tabs
-    print("[SHEETS] startup_provision_tabs: 모든 필수 탭 생성 중...", flush=True)
-    log.info("[SHEETS] startup_provision_tabs: 모든 필수 탭 생성 중...")
+    print("[SHEETS] startup_provision_tabs: creating required tabs...", flush=True)
+    log.info("[SHEETS] startup_provision_tabs: creating required tabs...")
 
     results: dict[str, str] = {}
     for tab_name, headers in [
@@ -133,9 +133,9 @@ async def lifespan(app: FastAPI):
 
     try:
         command_router.provision_tabs()
-        log.info("[SHEETS] V2 탭 (Update_Tracker / Task_Tracker) 준비 완료")
+        log.info("[SHEETS] V2 tabs (Update_Tracker / Task_Tracker) ready")
     except Exception as exc:
-        log.warning("[SHEETS] V2 탭 프로비저닝 실패 (계속 진행): %s", exc)
+        log.warning("[SHEETS] V2 tab provisioning failed (continuing): %s", exc)
 
     # ── touch_space flush loop — drains in-memory last_active cache to SQLite every 60s
     async def _flush_loop():
@@ -148,18 +148,32 @@ async def lifespan(app: FastAPI):
             except Exception:
                 log.exception("[Spaces] flush_touch_cache failed")
 
-    flush_task = asyncio.create_task(_flush_loop())
+    # ── find_task_row stats flush loop — 30s interval (accuracy matters more than spaces)
+    async def _flush_find_row_loop():
+        while True:
+            await asyncio.sleep(30)
+            try:
+                n = db.flush_find_row_cache()
+                if n:
+                    log.debug("[FindRow] flush_find_row_cache: %d event(s) written", n)
+            except Exception:
+                log.exception("[FindRow] flush_find_row_cache failed")
+
+    flush_task          = asyncio.create_task(_flush_loop())
+    flush_find_row_task = asyncio.create_task(_flush_find_row_loop())
 
     log.info("Agency Tracker started — timezone=%s", TIMEZONE)
     yield
 
-    flush_task.cancel()
-    try:
-        await flush_task
-    except asyncio.CancelledError:
-        pass
-    db.flush_touch_cache()  # final drain before shutdown
-    log.info("[Spaces] touch_space cache flushed on shutdown")
+    for task in (flush_task, flush_find_row_task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    db.flush_touch_cache()       # final drain before shutdown
+    db.flush_find_row_cache()    # final drain before shutdown
+    log.info("[Spaces] touch_space + find_row caches flushed on shutdown")
 
 
 app = FastAPI(title="Agency Remote Tracking System", version="1.0.0", lifespan=lifespan)
@@ -508,7 +522,7 @@ def _handle_message(body: dict) -> None:
     try:
         v2_reply = command_router.dispatch(body)
     except Exception as _v2_err:
-        log.error("[Router] dispatch 예외: %s", _v2_err)
+        log.error("[Router] dispatch exception: %s", _v2_err)
         v2_reply = None
 
     if v2_reply is not None:
@@ -516,7 +530,7 @@ def _handle_message(body: dict) -> None:
             gchat_sender.reply_to_thread(space_name, thread_key, v2_reply)
         else:
             log.error(
-                "[Router] V2 응답 드롭 — thread 컨텍스트 없음: space=%r thread=%r",
+                "[Router] V2 reply dropped — missing thread context: space=%r thread=%r",
                 space_name, thread_key,
             )
         return  # V2 커맨드 처리 완료 — 이하 로직 스킵
@@ -849,33 +863,28 @@ async def toggle_space_sla(
 
 
 @app.get("/admin/find-task-row-stats")
-async def find_task_row_stats(
-    days: int = 14,
-    _: None = Depends(_verify_admin),
+async def get_find_task_row_stats(
+    days: int = 30,
+    _=Depends(_verify_admin),
 ):
-    """Return _find_task_row() match/no-match counts per strategy for the last N days.
+    """Return _find_task_row() aggregate stats for the last N days.
 
+    Flushes in-memory counters before querying so recent calls are included.
+    Response shape:
+      {
+        "period_days": 30,
+        "total_calls": 1523,
+        "no_match": 4,
+        "by_strategy": {
+          "1": {"count": 1450, "pct": 95.2},
+          ...
+          "6": {"count": 3, "pct": 0.2}
+        }
+      }
     strategy 0 = no match; 1-6 = matched strategy number.
-    Query param: ?days=14 (default)
     """
-    rows = db.get_find_task_row_stats(days)
-    data: dict[str, dict[str, int]] = {}
-    for r in rows:
-        data.setdefault(r["date"], {})[str(r["strategy"])] = r["count"]
-    strategy_labels = {
-        "0": "no_match",
-        "1": "exact", "2": "suffix", "3": "segment",
-        "4": "key", "5": "assignee", "6": "raw",
-    }
-    result = []
-    for date_str, counts in sorted(data.items(), reverse=True):
-        entry = {"date": date_str}
-        total = sum(v for k, v in counts.items() if k != "0")
-        for s, label in strategy_labels.items():
-            entry[label] = counts.get(s, 0)
-        entry["total_matched"] = total
-        result.append(entry)
-    return {"days": days, "rows": result}
+    db.flush_find_row_cache()  # include counters not yet written to DB
+    return db.get_find_task_row_stats(days)
 
 
 @app.post("/admin/trigger-weekly-report")

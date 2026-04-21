@@ -80,3 +80,33 @@ def reply_to_thread(space_name: str, thread_name: str, text: str) -> dict:
         space_name, thread_name, data.get("thread", {}).get("name"),
     )
     return data
+
+
+def send_card_to_thread(space_name: str, thread_name: str, card: dict) -> dict:
+    """Post a Card v2 message as a threaded reply.
+
+    card must be a dict with a top-level "cardsV2" key as returned by the
+    wiki/validator._build_verification_card() helper.
+    """
+    token = _get_token()
+    url   = f"{_CHAT_API}/{space_name}/messages"
+    payload = {
+        **card,
+        "thread": {"name": thread_name},
+    }
+    with httpx.Client(timeout=15) as client:
+        resp = client.post(
+            url,
+            params={"messageReplyOption": "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"},
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=payload,
+        )
+    if resp.status_code != 200:
+        log.error("Google Chat card send failed: %s %s", resp.status_code, resp.text)
+        return {}
+    data = resp.json()
+    log.info(
+        "Card sent — space=%s thread=%s msg=%s",
+        space_name, thread_name, data.get("name", ""),
+    )
+    return data
