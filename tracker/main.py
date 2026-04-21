@@ -848,6 +848,36 @@ async def toggle_space_sla(
     return {"space_name": space_name, "sla_enabled": enabled, "previous": before}
 
 
+@app.get("/admin/find-task-row-stats")
+async def find_task_row_stats(
+    days: int = 14,
+    _: None = Depends(_verify_admin),
+):
+    """Return _find_task_row() match/no-match counts per strategy for the last N days.
+
+    strategy 0 = no match; 1-6 = matched strategy number.
+    Query param: ?days=14 (default)
+    """
+    rows = db.get_find_task_row_stats(days)
+    data: dict[str, dict[str, int]] = {}
+    for r in rows:
+        data.setdefault(r["date"], {})[str(r["strategy"])] = r["count"]
+    strategy_labels = {
+        "0": "no_match",
+        "1": "exact", "2": "suffix", "3": "segment",
+        "4": "key", "5": "assignee", "6": "raw",
+    }
+    result = []
+    for date_str, counts in sorted(data.items(), reverse=True):
+        entry = {"date": date_str}
+        total = sum(v for k, v in counts.items() if k != "0")
+        for s, label in strategy_labels.items():
+            entry[label] = counts.get(s, 0)
+        entry["total_matched"] = total
+        result.append(entry)
+    return {"days": days, "rows": result}
+
+
 @app.post("/admin/trigger-weekly-report")
 async def trigger_weekly_report(
     background_tasks: BackgroundTasks,

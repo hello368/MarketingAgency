@@ -38,6 +38,7 @@ from google.oauth2.service_account import Credentials
 
 import db
 import state
+import ai_engine
 import telegram_bot
 import gchat_sender
 from config import NAG_L1_SECONDS, NAG_L2_SECONDS, NAG_L3_SECONDS
@@ -171,9 +172,143 @@ _NAG_L3_TELEGRAM = (
     "Manual intervention required."
 )
 
+# ── Wiki query constants ──────────────────────────────────────────────────────
+_TAB_CLIENT_WIKI = "Client_Wiki"
+_WIKI_HEADERS    = ["Timestamp", "Client", "Category", "Value", "Source_Link", "Status"]
+
+# Matches: @best wiki <client name>  (BOT_DISPLAY_NAME resolved at runtime)
+_WIKI_CMD_RE = re.compile(
+    r"@" + re.escape(os.getenv("BOT_DISPLAY_NAME", "best")) + r"\s+wiki\s+(.+)",
+    re.IGNORECASE,
+)
+
+_WIKI_SUMMARY_SYSTEM = """\
+You are a professional reporting assistant for a marketing agency.
+You receive category-value pairs from the agency's verified client database.
+Write a 1-2 sentence executive summary in professional business English.
+Lead with the client name. Prioritize: monthly plan/fee, ad budget, account manager.
+Example: "Luna Medspa is currently on a $1,509/mo plan with a $100/day ad budget, managed by Tiffany."
+"""
+
 # ── Shared state ──────────────────────────────────────────────────────────────
 _spreadsheet: gspread.Spreadsheet | None = None
 _sheet_lock   = threading.Lock()
+
+
+# ── Wiki query helpers ────────────────────────────────────────────────────────
+
+def _is_wiki_command(text: str) -> str | None:
+    """
+    Returns the client name if text matches '@best wiki <client name>', else None.
+    Strips any trailing @mentions or URLs from the captured client name.
+    """
+    m = _WIKI_CMD_RE.search(text)
+    if not m:
+        return None
+    raw = re.sub(r"https?://\S+", "", m.group(1))
+    raw = re.sub(r"@\S+", "", raw).strip()
+    return raw if raw else None
+
+
+def _get_wiki_tab() -> gspread.Worksheet:
+    """Open Client_Wiki using the shared spreadsheet connection."""
+    global _spreadsheet
+    with _sheet_lock:
+        if _spreadsheet is None:
+            creds  = Credentials.from_service_account_file(_CREDS_PATH, scopes=_SCOPES)
+            client = gspread.authorize(creds)
+            _spreadsheet = client.open_by_key(_SPREADSHEET_ID)
+        try:
+            return _spreadsheet.worksheet(_TAB_CLIENT_WIKI)
+        except gspread.WorksheetNotFound:
+            ws = _spreadsheet.add_worksheet(
+                title=_TAB_CLIENT_WIKI, rows=1000, cols=len(_WIKI_HEADERS)
+            )
+            ws.append_row(_WIKI_HEADERS, value_input_option="USER_ENTERED")
+            ws.format("1:1", {"textFormat": {"bold": True}})
+            log.info("[Wiki] Created tab: %s", _TAB_CLIENT_WIKI)
+            return ws
+
+
+def _handle_wiki_query(client_name: str) -> dict:
+    """
+    Query Client_Wiki for all Verified records matching client_name, then
+    return a professional executive summary as a Google Chat reply dict.
+    """
+    try:
+        ws      = _get_wiki_tab()
+        records = ws.get_all_records()
+    except Exception as exc:
+        log.error("[Wiki] Sheet read failed: %s", exc)
+        return {"text": "❌ Could not reach the Client Wiki sheet. Please check the logs."}
+
+    q        = client_name.strip().lower()
+    matched  = [
+        r for r in records
+        if q in str(r.get("Client", "")).strip().lower()
+        or str(r.get("Client", "")).strip().lower() in q
+    ]
+    verified = [r for r in matched if str(r.get("Status", "")).strip().lower() == "verified"]
+    pending  = [r for r in matched if str(r.get("Status", "")).strip().lower() == "pending"]
+
+    log.info(
+        "[Wiki] query=%r matched=%d verified=%d pending=%d",
+        client_name, len(matched), len(verified), len(pending),
+    )
+
+    if not matched:
+        return {
+            "text": (
+                f"No data found for *{client_name}* in the Client Wiki.\n"
+                "_This client may not have been added yet, or data is still being processed._"
+            )
+        }
+
+    if not verified:
+        return {
+            "text": (
+                f"*{client_name}* has {len(pending)} pending record(s) awaiting verification.\n"
+                "_No verified data is available yet._"
+            )
+        }
+
+    data_lines = [
+        f"- {r.get('Category', '?')}: {r.get('Value', '?')}"
+        for r in verified
+    ]
+    prompt = (
+        f"Client: {client_name}\n\n"
+        f"Verified data:\n" + "\n".join(data_lines) + "\n\n"
+        "Write a professional 1-2 sentence executive summary."
+    )
+    summary = ai_engine.chat(
+        prompt,
+        task_type="fast_reply",
+        system=_WIKI_SUMMARY_SYSTEM,
+        temperature=0.2,
+    )
+
+    if not summary:
+        # Rule-based fallback when AI is unavailable
+        data   = {r.get("Category", "").strip().lower(): r.get("Value", "").strip() for r in verified}
+        fee    = data.get("service fee") or data.get("monthly fee") or data.get("retainer")
+        budget = data.get("ad budget") or data.get("budget") or data.get("daily budget")
+        mgr    = data.get("assignee") or data.get("account manager") or data.get("managed by")
+        parts: list[str] = [client_name]
+        if fee:
+            parts.append(f"is on a {fee} plan")
+        if budget:
+            parts.append(f"with a {budget} ad budget")
+        if mgr:
+            parts.append(f"managed by {mgr}")
+        summary = ", ".join(parts[:3]) + "."
+
+    suffix = f"\n\n_{len(verified)} verified record(s)"
+    if pending:
+        suffix += f" · {len(pending)} pending"
+    suffix += "_"
+
+    return {"text": f"*Client Wiki — {client_name}*\n\n{summary}{suffix}"}
 
 
 # ── Sheet helpers ─────────────────────────────────────────────────────────────
@@ -334,14 +469,14 @@ def _find_task_row(
     Find the sheet row whose Thread ID column (B) matches thread_id.
 
     Matching order (first hit wins):
-      1. Exact match after normalizing whitespace, slashes, query params
+      1. Exact match — normalize whitespace, slashes, query params
       2. Suffix match — handles 'spaces/X/threads/Y' vs 'threads/Y'
-      3. Thread-segment match — 'threads/Y' extracted from both sides
-      4. Final-key match — bare thread key (last path component) compared
-      5. Assignee contains-match (fallback) — any of strategies 1-4 failed;
-         sender_name is found within the Assignee(s) cell (handles multi-assignee
-         rows like 'Tiffany Lear, Kaye Hi' when thread IDs diverge in format).
-         Thread ID wins — no assignee check is applied for strategies 1-4.
+      3. Thread-segment match — compare 'threads/Y' extracted from both sides
+      4. Final-key match — bare thread key (last path component)
+      5. Assignee contains-match — sender_name found in Assignee(s) cell
+         (fallback when thread IDs diverge in format across API versions)
+      6. Raw substring / bare-key — skips normalization to catch edge cases
+         where the normalizer strips the wrong segment
     """
     print(f"[FIND_ROW] ▶ incoming={thread_id!r} | sender={sender_name!r}", flush=True)
 
@@ -371,38 +506,34 @@ def _find_task_row(
 
         # Strategy 1: exact — thread-first, no assignee check needed
         if norm_stored == norm_in:
-            log.info("[TaskTracker] Thread match (exact) row=%d stored_norm=%s", i, norm_stored)
+            log.info("[_find_task_row] matched", extra={"thread_id": thread_id, "row": i, "strategy": 1})
+            print(f"[FIND_ROW] ✅ S1 exact — row={i}", flush=True)
+            db.record_find_task_row_match(1)
             return i
 
         # Strategy 2: suffix
         if norm_in.endswith(norm_stored) or norm_stored.endswith(norm_in):
-            log.info(
-                "[TaskTracker] Thread match (suffix) row=%d "
-                "stored_norm=%s incoming_norm=%s",
-                i, norm_stored, norm_in,
-            )
+            log.info("[_find_task_row] matched", extra={"thread_id": thread_id, "row": i, "strategy": 2})
+            print(f"[FIND_ROW] ✅ S2 suffix — row={i}", flush=True)
+            db.record_find_task_row_match(2)
             return i
 
         # Strategy 3: threads/XXXX segment
         if seg_in:
             seg_stored = _thread_segment(norm_stored)
             if seg_stored and seg_stored == seg_in:
-                log.info(
-                    "[TaskTracker] Thread match (segment) row=%d "
-                    "stored_norm=%s incoming_norm=%s",
-                    i, norm_stored, norm_in,
-                )
+                log.info("[_find_task_row] matched", extra={"thread_id": thread_id, "row": i, "strategy": 3})
+                print(f"[FIND_ROW] ✅ S3 segment — row={i}", flush=True)
+                db.record_find_task_row_match(3)
                 return i
 
         # Strategy 4: bare thread key (last path component)
         if key_in:
             key_stored = _thread_key(norm_stored)
             if key_stored and key_stored == key_in:
-                log.info(
-                    "[TaskTracker] Thread match (key) row=%d "
-                    "stored_norm=%s key=%s",
-                    i, norm_stored, key_in,
-                )
+                log.info("[_find_task_row] matched", extra={"thread_id": thread_id, "row": i, "strategy": 4})
+                print(f"[FIND_ROW] ✅ S4 key — row={i}", flush=True)
+                db.record_find_task_row_match(4)
                 return i
 
     # Strategies 1-4 exhausted — log stored IDs vs incoming for diff diagnosis
@@ -428,13 +559,9 @@ def _find_task_row(
                 continue
             assignees_cell = row[5].lower()
             if sender_lower in assignees_cell:
-                norm_stored = _normalize_thread_id(row[1]) if len(row) > 1 else ""
-                log.info(
-                    "[TaskTracker] Thread match (assignee-contains) row=%d "
-                    "assignees=%r sender=%r stored_norm=%s incoming_norm=%s",
-                    i, row[5], sender_name, norm_stored, norm_in,
-                )
+                log.info("[_find_task_row] matched", extra={"thread_id": thread_id, "row": i, "strategy": 5})
                 print(f"[FIND_ROW] ✅ S5 assignee match — row={i}", flush=True)
+                db.record_find_task_row_match(5)
                 return i
         log.warning(
             "[TaskTracker] Strategy 5 also failed — sender=%r not found in any assignee cell",
@@ -450,12 +577,14 @@ def _find_task_row(
         raw_stored = _extract_lookup_id(row[1])
         raw_key_stored = raw_stored.rsplit("/", 1)[-1] if "/" in raw_stored else raw_stored
         if raw_key_in and raw_key_in == raw_key_stored:
-            log.info("[TaskTracker] Thread match (S6-raw-key) row=%d raw_key=%s", i, raw_key_in)
+            log.info("[_find_task_row] matched", extra={"thread_id": thread_id, "row": i, "strategy": 6})
             print(f"[FIND_ROW] ✅ S6 raw-key match — row={i} key={raw_key_in!r}", flush=True)
+            db.record_find_task_row_match(6)
             return i
         if raw_stored and (thread_id in raw_stored or raw_stored in thread_id):
-            log.info("[TaskTracker] Thread match (S6-substring) row=%d stored=%r", i, raw_stored)
+            log.info("[_find_task_row] matched", extra={"thread_id": thread_id, "row": i, "strategy": 6})
             print(f"[FIND_ROW] ✅ S6 substring match — row={i} stored={raw_stored!r}", flush=True)
+            db.record_find_task_row_match(6)
             return i
 
     all_raw = [_extract_lookup_id(r[1]) for r in all_rows[1:] if len(r) > 1 and r[1]]
@@ -464,10 +593,8 @@ def _find_task_row(
         f"all stored IDs: {all_raw}",
         flush=True,
     )
-    log.warning(
-        "[TaskTracker] No row found — thread_id=%s | norm=%s | seg=%s | key=%s | rows_checked=%d",
-        thread_id, norm_in, seg_in, key_in, len(all_rows) - 1,
-    )
+    log.warning("[_find_task_row] NO MATCH", extra={"thread_id": thread_id})
+    db.record_find_task_row_match(0)
     return None
 
 
@@ -1394,6 +1521,12 @@ def handle_task_event(
         result = _handle_snooze(thread_id, sender_name, sender_id, now)
         if result:
             return result
+
+    # ── Scenario E: Wiki Query — @best wiki [Client Name] ────────────────────
+    wiki_client = _is_wiki_command(text)
+    if wiki_client:
+        log.info("[Wiki] Scenario E — client query: %r", wiki_client)
+        return _handle_wiki_query(wiki_client)
 
     # ── Scenario B: New Task Registration ─────────────────────────────────────
     if not _bot_was_mentioned(text):

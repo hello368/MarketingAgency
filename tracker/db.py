@@ -6,7 +6,7 @@ import os
 import time
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Lock
 from zoneinfo import ZoneInfo
 from config import TEAM_MEMBERS, TIMEZONE
