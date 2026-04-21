@@ -814,11 +814,14 @@ async def test_reply(request: Request):
 
 
 @app.post("/admin/trigger-weekly-report")
-async def trigger_weekly_report(background_tasks: BackgroundTasks):
-    """Manually trigger the weekly AI report (dev/backfill use)."""
+async def trigger_weekly_report(background_tasks: BackgroundTasks, overwrite: bool = False):
+    """Manually trigger the weekly AI report.
+
+    ?overwrite=true  — re-write existing Week_Label row in the sheet instead of skipping.
+    """
     from scheduler import job_weekly_report
-    background_tasks.add_task(job_weekly_report)
-    return {"status": "ok", "note": "Weekly report job queued in background"}
+    background_tasks.add_task(job_weekly_report, overwrite)
+    return {"status": "ok", "overwrite": overwrite, "note": "Weekly report job queued in background"}
 
 
 @app.get("/")

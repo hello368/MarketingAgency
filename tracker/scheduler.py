@@ -239,6 +239,173 @@ def job_focus_check():
     task_tracker.check_and_fire_focus_checks()
 
 
+# ─────────────────────────────────────────
+# JOB 8: Every Friday 17:00 — Weekly AI Report
+# ─────────────────────────────────────────
+
+def _date_range_this_week() -> tuple[str, str, str]:
+    """Return (week_label, date_from, date_to) for the Mon–Fri week ending today."""
+    import datetime as _dt
+    now = datetime.now(TZ)
+    monday = now - _dt.timedelta(days=now.weekday())
+    friday = monday + _dt.timedelta(days=4)
+    label = f"W{monday.strftime('%Y-%m-%d')}"
+    return label, monday.strftime("%Y-%m-%d"), friday.strftime("%Y-%m-%d")
+
+
+def job_weekly_report(overwrite: bool = False):
+    """Aggregate the week's tracking data, generate AI narrative, send to Michael on Telegram.
+
+    Staged execution (each stage independent):
+      1. DB aggregation   — abort on failure
+      2. Sheet recording  — continue on failure (logged)
+      3. AI report gen    — abort on failure
+      4. Telegram send    — 3 retries with exponential backoff
+    """
+    import time as _time
+    log.info("[Scheduler] Running weekly report job (overwrite=%s)", overwrite)
+    week_label, date_from, date_to = _date_range_this_week()
+
+    michael = db.get_member_by_name("Michael")
+
+    def _alert_michael(msg: str):
+        if michael and michael["telegram_chat_id"]:
+            telegram_bot.send_direct(michael["telegram_chat_id"], msg)
+
+    # ── Stage 1: DB aggregation ───────────────────────────────────────────────
+    try:
+        con = db.get_conn()
+
+        checkins_ontime  = con.execute(
+            "SELECT COUNT(*) FROM checkins WHERE date BETWEEN ? AND ? AND status='on-time'",
+            (date_from, date_to)
+        ).fetchone()[0]
+        checkins_late    = con.execute(
+            "SELECT COUNT(*) FROM checkins WHERE date BETWEEN ? AND ? AND status='late'",
+            (date_from, date_to)
+        ).fetchone()[0]
+        checkins_missing = con.execute(
+            "SELECT COUNT(*) FROM checkins WHERE date BETWEEN ? AND ? AND status='missing'",
+            (date_from, date_to)
+        ).fetchone()[0]
+
+        eods_submitted = con.execute(
+            "SELECT COUNT(*) FROM eod_submissions WHERE date BETWEEN ? AND ? AND status='submitted'",
+            (date_from, date_to)
+        ).fetchone()[0]
+        eods_missing   = con.execute(
+            "SELECT COUNT(*) FROM eod_submissions WHERE date BETWEEN ? AND ? AND status='missing'",
+            (date_from, date_to)
+        ).fetchone()[0]
+
+        sla_breaches = con.execute(
+            "SELECT COUNT(*) FROM sla_timers WHERE telegram_pinged=1 AND created_at >= ? AND created_at <= ?",
+            (date_from + "T00:00:00", date_to + "T23:59:59")
+        ).fetchone()[0]
+        sla_met = con.execute(
+            "SELECT COUNT(*) FROM sla_timers WHERE resolved=1 AND telegram_pinged=0 AND created_at >= ? AND created_at <= ?",
+            (date_from + "T00:00:00", date_to + "T23:59:59")
+        ).fetchone()[0]
+
+        tasks_created   = con.execute(
+            "SELECT COUNT(*) FROM task_nag_timers WHERE created_at >= ? AND created_at <= ?",
+            (date_from + "T00:00:00", date_to + "T23:59:59")
+        ).fetchone()[0]
+        tasks_completed = con.execute(
+            "SELECT COUNT(*) FROM task_nag_timers WHERE acknowledged=1 AND created_at >= ? AND created_at <= ?",
+            (date_from + "T00:00:00", date_to + "T23:59:59")
+        ).fetchone()[0]
+
+        offenders = con.execute(
+            """SELECT tagged_name, COUNT(*) as breaches
+               FROM sla_timers
+               WHERE telegram_pinged=1 AND created_at >= ? AND created_at <= ?
+               GROUP BY tagged_name ORDER BY breaches DESC LIMIT 3""",
+            (date_from + "T00:00:00", date_to + "T23:59:59")
+        ).fetchall()
+        con.close()
+    except Exception as db_err:
+        log.error("[Scheduler] Weekly report DB aggregation failed: %s", db_err)
+        _alert_michael(f"❌ *Weekly Report FAILED* — DB aggregation error:\n`{db_err}`")
+        return
+
+    total_sla      = sla_breaches + sla_met
+    breach_rate    = round(sla_breaches / total_sla * 100, 1) if total_sla else 0.0
+    total_checkins = checkins_ontime + checkins_late + checkins_missing
+    offender_text  = ", ".join(f"{r[0]}({r[1]})" for r in offenders) if offenders else "none"
+
+    # ── Stage 2: Sheet recording (continue on failure) ────────────────────────
+    sheet_ok = False
+    try:
+        sheet_ok = sheets_client.log_weekly_kpi(
+            week_label=week_label,
+            date_from=date_from,
+            date_to=date_to,
+            checkins_ontime=checkins_ontime,
+            checkins_late=checkins_late,
+            checkins_missing=checkins_missing,
+            eods_submitted=eods_submitted,
+            eods_missing=eods_missing,
+            sla_breaches=sla_breaches,
+            sla_met=sla_met,
+            tasks_created=tasks_created,
+            tasks_completed=tasks_completed,
+            overwrite=overwrite,
+        )
+    except Exception as sheet_err:
+        log.warning("[Scheduler] Weekly KPI sheet write failed: %s", sheet_err)
+
+    sheet_note = "📊 Sheet: ✅ recorded" if sheet_ok else "📊 Sheet: ⚠️ skipped or failed"
+
+    # ── Stage 3: AI report generation ────────────────────────────────────────
+    try:
+        prompt = (
+            f"Write a concise weekly performance summary for a remote agency manager. "
+            f"Week {date_from} to {date_to}. Team size: 12.\n"
+            f"Check-ins: {checkins_ontime} on-time, {checkins_late} late, {checkins_missing} missing "
+            f"(total slots: {total_checkins}).\n"
+            f"EOD submissions: {eods_submitted} submitted, {eods_missing} missing.\n"
+            f"SLA @mention compliance: {sla_met} met, {sla_breaches} breached ({breach_rate}% breach rate). "
+            f"Top breach contributors: {offender_text}.\n"
+            f"Tasks: {tasks_created} created, {tasks_completed} completed.\n"
+            f"Keep to 4–6 bullet points. Lead with the biggest concern. End with one actionable recommendation."
+        )
+        ai_text = ai_engine.chat(prompt, task_type="long_context")
+    except Exception as ai_err:
+        log.error("[Scheduler] Weekly report AI generation failed: %s", ai_err)
+        _alert_michael(f"❌ *Weekly Report FAILED* — AI error:\n`{ai_err}`")
+        return
+
+    report = (
+        f"📊 *Weekly Report — {week_label}* ({date_from} → {date_to})\n\n"
+        f"✅ Check-ins: {checkins_ontime}/{total_checkins} on-time | "
+        f"{checkins_late} late | {checkins_missing} missing\n"
+        f"📋 EOD: {eods_submitted} submitted | {eods_missing} missing\n"
+        f"⚡ SLA: {sla_met} met | {sla_breaches} breached ({breach_rate}%)\n"
+        f"📌 Tasks: {tasks_created} created | {tasks_completed} completed\n"
+        f"{sheet_note}\n\n"
+        + (ai_text or "_(AI unavailable — raw data above)_")
+    )
+
+    # ── Stage 4: Telegram send (3 retries, exponential backoff) ───────────────
+    if not michael or not michael["telegram_chat_id"]:
+        log.warning("[Scheduler] Weekly report generated but Michael has no Telegram ID")
+        return
+
+    for attempt in range(1, 4):
+        try:
+            telegram_bot.send_direct(michael["telegram_chat_id"], report)
+            log.info("[Scheduler] Weekly report sent to Michael (attempt %d)", attempt)
+            break
+        except Exception as tg_err:
+            wait = 2 ** attempt
+            log.warning("[Scheduler] Telegram send attempt %d failed (%s) — retry in %ds", attempt, tg_err, wait)
+            if attempt < 3:
+                _time.sleep(wait)
+            else:
+                log.error("[Scheduler] Weekly report Telegram delivery failed after 3 attempts")
+
+
 def create_scheduler() -> BackgroundScheduler:
     scheduler = BackgroundScheduler(timezone=TZ)
 
@@ -273,6 +440,12 @@ def create_scheduler() -> BackgroundScheduler:
     # Focus mode check — fires 45-min check-in questions and resumes nags on no-reply.
     scheduler.add_job(
         job_focus_check, "interval", seconds=15, id="focus_check", replace_existing=True
+    )
+    # Weekly report — every Friday 17:00 Manila time.
+    scheduler.add_job(
+        job_weekly_report, CronTrigger(
+            day_of_week="fri", hour=17, minute=0, timezone=TZ
+        ), id="weekly_report", replace_existing=True
     )
 
     return scheduler
