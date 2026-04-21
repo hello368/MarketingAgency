@@ -10,7 +10,7 @@ import os
 
 from openai import OpenAI
 
-from config import MODEL_FAST, MODEL_SMART
+from tracker.config import MODEL_FAST, MODEL_SMART
 
 log = logging.getLogger(__name__)
 

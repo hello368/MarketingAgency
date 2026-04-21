@@ -34,6 +34,8 @@ from typing import Literal
 
 from openai import OpenAI, APIError, APITimeoutError, RateLimitError
 
+from tracker.config import MODEL_SMART
+
 log = logging.getLogger(__name__)
 
 
@@ -58,7 +60,7 @@ class WikiModelRouter:
 
     _BASE_URL      = "https://openrouter.ai/api/v1"
     _WORKER_MODEL  = "deepseek/deepseek-chat"
-    _ANALYST_MODEL = "anthropic/claude-3.5-sonnet"
+    _ANALYST_MODEL = MODEL_SMART
 
     def __init__(self, api_key: str | None = None, timeout: float = 30.0):
         key = api_key or os.environ.get("OPENROUTER_API_KEY", "")

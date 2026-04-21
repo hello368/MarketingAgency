@@ -9,6 +9,7 @@ Endpoints:
 import os
 import re
 import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import time
 import asyncio
 import logging
@@ -47,8 +48,6 @@ import task_tracker
 import gchat_sender
 import command_router  # V2 @best 커맨드 라우터
 
-# ── Wiki modules (project root is one level above tracker/) ──────────────────
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from wiki.interceptor import WikiInterceptor, WikiModelRouter
 from wiki.validator import WikiValidator
 

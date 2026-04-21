@@ -13,11 +13,13 @@ import os
 
 from openai import OpenAI, APIError, APITimeoutError, RateLimitError
 
+from tracker.config import MODEL_SMART
+
 log = logging.getLogger(__name__)
 
 _OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 MODEL_EXTRACTOR  = "deepseek/deepseek-chat"
-MODEL_WIKI_QUERY = "anthropic/claude-3.5-sonnet"
+MODEL_WIKI_QUERY = MODEL_SMART
 
 _CONTENT_SUMMARY_SYSTEM = """\
 You are a concise content labeler for a marketing agency message archive.
