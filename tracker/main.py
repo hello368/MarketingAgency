@@ -8,9 +8,14 @@ Endpoints:
 """
 import os
 import re
+import sys
+import time
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -40,6 +45,16 @@ import ai_engine
 import state
 import task_tracker
 import gchat_sender
+import command_router  # V2 @best 커맨드 라우터
+
+# ── Wiki modules (project root is one level above tracker/) ──────────────────
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from wiki.interceptor import WikiInterceptor, WikiModelRouter
+from wiki.validator import WikiValidator
+
+_wiki_interceptor: WikiInterceptor | None = None
+_wiki_validator:   WikiValidator   | None = None
+_wiki_router:      WikiModelRouter | None = None
 
 # ─────────────────────────────────────────
 # Startup
@@ -47,47 +62,97 @@ import gchat_sender
 TZ = ZoneInfo(TIMEZONE)
 db.init_db()
 
-app = FastAPI(title="Agency Remote Tracking System", version="1.0.0")
-scheduler = create_scheduler()
-scheduler.start()
-telegram_bot.start_polling()
-
-log.info("Agency Tracker started — timezone=%s", TIMEZONE)
-
 _ai_ok: bool = False
 
 
-@app.on_event("startup")
-async def startup_ai_engine():
-    """Initialise ModelRouter (OpenRouter) — smart routing for SLA + alerts."""
-    global _ai_ok
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _ai_ok, _wiki_interceptor, _wiki_validator, _wiki_router
+
+    # ── AI Engine
     _ai_ok = ai_engine.init()
 
-
-@app.on_event("startup")
-async def startup_gsheet_test():
-    """Connect to Google Sheets and mark Ivan Online as a connectivity test."""
+    # ── Google Sheets
     creds_path = os.environ.get("GOOGLE_CREDENTIALS_PATH", "./credentials/service_account.json")
-    spreadsheet_id = os.environ.get(
-        "SPREADSHEET_ID", "1e_YQ9YBC_SCfM3Ex_rkg_f5NWlr5nOF9LBk3GT2TwZ8"
-    )
+    spreadsheet_id = os.environ.get("SPREADSHEET_ID", "1e_YQ9YBC_SCfM3Ex_rkg_f5NWlr5nOF9LBk3GT2TwZ8")
 
     if not spreadsheet_id:
         log.error("[GSheet] ❌ SPREADSHEET_ID is not set — Sheets integration disabled.")
-        return
+    else:
+        try:
+            state.gsheet = GSheetHandler(credentials_path=creds_path, spreadsheet_id=spreadsheet_id)
+            state.gsheet_ok = True
+            log.info("[GSheet] ✅ Connected to Google Sheets successfully.")
+        except Exception as exc:
+            log.error("[GSheet] ❌ Failed to connect to Google Sheets: %s", exc)
+
+    # ── Wiki
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not openrouter_key:
+        log.warning("[Wiki] ⚠️ OPENROUTER_API_KEY not set — wiki entity detection disabled")
+    else:
+        try:
+            _wiki_router      = WikiModelRouter(api_key=openrouter_key)
+            _wiki_interceptor = WikiInterceptor(api_key=openrouter_key)
+            _wiki_validator   = WikiValidator(gchat_sender, sheets_client)
+            log.info("[Wiki] ✅ WikiInterceptor + WikiValidator + WikiModelRouter ready")
+        except Exception as exc:
+            log.error("[Wiki] ❌ Startup failed: %s", exc)
+
+    # ── Provision Sheets tabs
+    print("[SHEETS] startup_provision_tabs: 모든 필수 탭 생성 중...", flush=True)
+    log.info("[SHEETS] startup_provision_tabs: 모든 필수 탭 생성 중...")
+
+    results: dict[str, str] = {}
+    for tab_name, headers in [
+        (sheets_client.TAB_CLIENT_WIKI,  sheets_client._WIKI_HEADERS),
+        (sheets_client.TAB_CHAT_ARCHIVE, sheets_client._ARCHIVE_HEADERS),
+    ]:
+        try:
+            sheets_client._get_or_create_tab(tab_name, headers)
+            results[tab_name] = "✅ OK"
+        except Exception as exc:
+            results[tab_name] = f"❌ FAILED: {exc}"
+
+    for tab, status in results.items():
+        print(f"[SHEETS] {tab}: {status}", flush=True)
+        log.info("[SHEETS] %s: %s", tab, status)
 
     try:
-        state.gsheet = GSheetHandler(credentials_path=creds_path, spreadsheet_id=spreadsheet_id)
-        updated = state.gsheet.update_status("Ivan", "🟢 Online (System Initialized)")
-        if updated:
-            log.info("[GSheet] ✅ Connectivity test passed — Ivan's status updated on the sheet.")
-            state.gsheet_ok = True
-        else:
-            log.warning("[GSheet] ⚠️ Connected but 'Ivan' was not found in the Live Status tab.")
-    except FileNotFoundError as e:
-        log.error("[GSheet] ❌ %s", e)
-    except Exception as e:
-        log.error("[GSheet] ❌ Startup connection failed: %s", e)
+        command_router.provision_tabs()
+        log.info("[SHEETS] V2 탭 (Update_Tracker / Task_Tracker) 준비 완료")
+    except Exception as exc:
+        log.warning("[SHEETS] V2 탭 프로비저닝 실패 (계속 진행): %s", exc)
+
+    # ── touch_space flush loop — drains in-memory last_active cache to SQLite every 60s
+    async def _flush_loop():
+        while True:
+            await asyncio.sleep(60)
+            try:
+                n = db.flush_touch_cache()
+                if n:
+                    log.debug("[Spaces] flush_touch_cache: %d row(s) written", n)
+            except Exception:
+                log.exception("[Spaces] flush_touch_cache failed")
+
+    flush_task = asyncio.create_task(_flush_loop())
+
+    log.info("Agency Tracker started — timezone=%s", TIMEZONE)
+    yield
+
+    flush_task.cancel()
+    try:
+        await flush_task
+    except asyncio.CancelledError:
+        pass
+    db.flush_touch_cache()  # final drain before shutdown
+    log.info("[Spaces] touch_space cache flushed on shutdown")
+
+
+app = FastAPI(title="Agency Remote Tracking System", version="1.0.0", lifespan=lifespan)
+scheduler = create_scheduler()
+scheduler.start()
+telegram_bot.start_polling()
 
 
 # ─────────────────────────────────────────
@@ -195,6 +260,64 @@ def _resolve_member_name(display_name: str) -> str | None:
     return None
 
 
+_URL_RE = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+', re.IGNORECASE)
+
+
+def _extract_urls(text: str) -> list[str]:
+    return _URL_RE.findall(text)
+
+
+def _classify_message(text: str, attachments: list) -> tuple[str, str, str]:
+    """Inspect message content and attachments.
+
+    Returns (msg_type, attachment_name, file_link) where:
+      msg_type       — Text | URL | Image | PDF | File | Mixed
+      attachment_name — semicolon-joined filenames
+      file_link       — semicolon-joined Drive/download links + extracted URLs
+    """
+    att_names: list[str] = []
+    att_links: list[str] = []
+    att_type_tags: list[str] = []
+
+    for att in attachments:
+        name    = att.get("contentName") or att.get("name") or ""
+        mime    = att.get("contentType") or att.get("mimeType") or ""
+        drv_id  = att.get("driveDataRef", {}).get("driveFileId", "")
+        dl_uri  = att.get("downloadUri", "")
+
+        if name:
+            att_names.append(name)
+        if drv_id:
+            att_links.append(f"https://drive.google.com/file/d/{drv_id}/view")
+        elif dl_uri:
+            att_links.append(dl_uri)
+
+        name_lower = name.lower()
+        if mime.startswith("image/") or any(name_lower.endswith(x) for x in (".jpg", ".jpeg", ".png", ".gif", ".webp")):
+            att_type_tags.append("Image")
+        elif mime == "application/pdf" or name_lower.endswith(".pdf"):
+            att_type_tags.append("PDF")
+        elif name or mime:
+            att_type_tags.append("File")
+
+    urls_in_text = _extract_urls(text)
+    has_att      = bool(att_type_tags)
+    has_urls     = bool(urls_in_text)
+    has_plain    = bool(text.strip()) and len(text.strip()) > len(" ".join(urls_in_text))
+
+    if has_att:
+        unique_tags = list(dict.fromkeys(att_type_tags))
+        primary = unique_tags[0] if len(unique_tags) == 1 else "File"
+        msg_type = "Mixed" if has_urls else primary
+    elif has_urls:
+        msg_type = "Mixed" if has_plain else "URL"
+    else:
+        msg_type = "Text"
+
+    all_links = att_links + [u for u in urls_in_text if u not in att_links]
+    return msg_type, "; ".join(att_names), "; ".join(all_links)
+
+
 def _extract_mentions(message: dict) -> list[dict]:
     """
     Extract @mentioned users from a Google Chat message.
@@ -252,6 +375,12 @@ async def google_chat_webhook(request: Request, background_tasks: BackgroundTask
         space_name = space.get("displayName", "UNKNOWN")
         space_type = space.get("type", "UNKNOWN")
 
+        # Register this space for multi-space SLA tracking
+        try:
+            db.upsert_space(space_id, space_name, space_type)
+        except Exception as _sp_err:
+            log.warning("[Spaces] upsert_space failed: %s", _sp_err)
+
         log.info("=" * 60)
         log.info("[GChat] ✅ Bot added to space: '%s'", space_name)
         log.info("[GChat] 📋 SPACE ID   →  %s", space_id)
@@ -267,12 +396,28 @@ async def google_chat_webhook(request: Request, background_tasks: BackgroundTask
             )
         }
 
+    # ── CARD_CLICKED — must be handled synchronously (Google Chat reads the body)
+    if event_type == "CARD_CLICKED":
+        return _handle_card_click(norm_body)
+
     # ── MESSAGE — return 200 immediately, process in background
     if event_type == "MESSAGE":
         background_tasks.add_task(_handle_message, norm_body)
         return {}
 
     return {}
+
+
+def _handle_card_click(body: dict) -> dict:
+    """Synchronous CARD_CLICKED dispatcher — delegates to WikiValidator."""
+    if _wiki_validator is None:
+        log.warning("[GChat] CARD_CLICKED received but WikiValidator not initialised")
+        return {"text": "⚠️ Wiki validator is not available."}
+    try:
+        return _wiki_validator.handle_card_click(body)
+    except Exception as exc:
+        log.error("[GChat] CARD_CLICKED handler error: %s", exc)
+        return {"text": "⚠️ An error occurred while processing your action."}
 
 
 def _handle_message(body: dict) -> None:
@@ -285,6 +430,7 @@ def _handle_message(body: dict) -> None:
       3. EOD           — 16:45 result links in Daily Report thread
       4. SLA           — resolve existing timers + start new ones for @mentions
     """
+    _t0 = time.monotonic()
     message  = body.get("message", {})
     sender   = message.get("sender", {})
     space    = message.get("space", {})
@@ -304,9 +450,32 @@ def _handle_message(body: dict) -> None:
 
     log.info("[GChat] Message from %s in '%s'", sender_display, space_display)
 
+    # Update last_active timestamp for this space (multi-space SLA tracking)
+    if space_name:
+        try:
+            db.touch_space(space_name)
+        except Exception:
+            pass  # upsert_space may not have been called yet for this space
+        # Auto-register spaces we haven't seen via ADDED_TO_SPACE (e.g. existing spaces)
+        try:
+            db.upsert_space(space_name, space_display)
+        except Exception:
+            pass
+
     matched_name = _resolve_member_name(sender_display)
     if matched_name and sender_google_id:
         db.upsert_google_chat_id(matched_name, sender_google_id, sender_display)
+
+    # ── [0] WIKI EDIT REPLY — highest priority when thread is awaiting correction
+    if (
+        _wiki_validator is not None
+        and thread_key
+        and _wiki_validator.is_awaiting_edit(thread_key)
+    ):
+        consumed = _wiki_validator.handle_edit_reply(thread_key, text)
+        if consumed:
+            log.info("[Wiki] Edit reply consumed from %s in thread %s", sender_display, thread_key)
+            return
 
     # ── Live Status: update Last Active (col C) for every message from a known member
     if matched_name and state.gsheet:
@@ -321,19 +490,58 @@ def _handle_message(body: dict) -> None:
         if not task_tracker.is_acknowledgment(text) and not task_tracker.is_snooze(text):
             task_tracker.acknowledge_nag_timers(thread_key, matched_name)
 
-    # ── [1] TASK TRACKER — highest priority, checked before everything else
+    # ── [1] V2 COMMAND ROUTER — @best 커맨드 최우선 처리
+    # update / @담당자 / ! / urgent / ask / brief / undo / check
+    try:
+        v2_reply = command_router.dispatch(body)
+    except Exception as _v2_err:
+        log.error("[Router] dispatch 예외: %s", _v2_err)
+        v2_reply = None
+
+    if v2_reply is not None:
+        if space_name and thread_key:
+            gchat_sender.reply_to_thread(space_name, thread_key, v2_reply)
+        else:
+            log.error(
+                "[Router] V2 응답 드롭 — thread 컨텍스트 없음: space=%r thread=%r",
+                space_name, thread_key,
+            )
+        return  # V2 커맨드 처리 완료 — 이하 로직 스킵
+
+    # ── [2] TASK TRACKER — Track A: 기존 @best / ok / done 처리 (V2 미인식 시 폴백)
     task_reply = task_tracker.process_task_message(body)
     if task_reply:
         if space_name and thread_key:
-            # Thread-First: always reply inside the original task thread so the
-            # full lifecycle (Registration → OK → Done) stays in one place.
             gchat_sender.reply_to_thread(space_name, thread_key, task_reply["text"])
         else:
             log.error(
                 "[GChat] Task reply dropped — missing thread context: space=%r thread=%r text=%.80s",
                 space_name, thread_key, task_reply["text"],
             )
-        return
+        return  # Track A: command handled — skip Chat_Archive
+
+    # ── [2] CHAT ARCHIVE — Track B: non-command messages only
+    try:
+        _attachments = message.get("attachment") or message.get("attachments") or []
+        _msg_type, _, _file_link = _classify_message(text, _attachments)
+        _link = _file_link or message.get("name") or ""
+
+        # Generate 3-word content summary when message has a URL or file attachment
+        _summary = ""
+        if _msg_type != "Text" and _wiki_router is not None:
+            _url_list = [u for u in _file_link.split("; ") if u] if _file_link else []
+            _summary = _wiki_router.summarize_content(text, _url_list)
+
+        sheets_client.log_chat_archive(
+            timestamp = now_local.strftime("%Y-%m-%d %H:%M:%S"),
+            space     = space_display,
+            user      = sender_display,
+            message   = text,
+            link      = _link,
+            summary   = _summary,
+        )
+    except Exception as _arc_err:
+        log.debug("[Archive] Silent log suppressed: %s", _arc_err)
 
     # ── Date reset (daily thread keys expire at midnight)
     checkin_thread_key = db.get_state("checkin_thread_key")
@@ -417,6 +625,33 @@ def _handle_message(body: dict) -> None:
             tagger_name, tagged_name, space_display,
             deadline.strftime("%H:%M:%S"), timer_id,
         )
+
+    # ── [5] WIKI ENTITY DETECTION — run interceptor on every non-bot message
+    if _wiki_interceptor is not None and _wiki_validator is not None and text and space_name and thread_key:
+        try:
+            extraction = _wiki_interceptor.intercept(text)
+            if extraction.has_any():
+                message_link = (
+                    message.get("name", "")
+                    or f"https://chat.google.com/room/{space_name}/{thread_key}"
+                )
+                _wiki_validator.prompt_verification(
+                    extraction,
+                    space_name,
+                    thread_key,
+                    sender_google_id,
+                    source_link=message_link,
+                )
+                log.info(
+                    "[Wiki] Entity detected from %s — status=%s fields=%s",
+                    sender_display,
+                    extraction.status,
+                    [n for n, f in extraction.extracted_fields().items() if f.has_value()],
+                )
+        except Exception as exc:
+            log.warning("[Wiki] Interception failed silently: %s", exc)
+
+    log.info("[webhook] handler %.1fms | space=%s sender=%s", (time.monotonic() - _t0) * 1000, space_display, sender_display)
 
 
 # ─────────────────────────────────────────
@@ -517,6 +752,12 @@ async def health():
     active_timers    = con.execute("SELECT COUNT(*) FROM sla_timers WHERE resolved=0 AND telegram_pinged=0").fetchone()[0]
     con.close()
 
+    spaces = db.get_all_spaces()
+    monitored_spaces = [
+        {"name": s["space_name"], "display": s["display_name"], "last_active": s["last_active"]}
+        for s in spaces
+    ]
+
     return {
         "status":              "ok",
         "timestamp":           datetime.now(TZ).isoformat(),
@@ -530,6 +771,8 @@ async def health():
         "active_sla_timers":   active_timers,
         "checkin_thread":      db.get_state("checkin_thread_key") or "not set",
         "eod_thread":          db.get_state("eod_thread_key") or "not set",
+        "monitored_spaces":    monitored_spaces,
+        "spaces_count":        len(monitored_spaces),
     }
 
 
@@ -568,6 +811,14 @@ async def test_reply(request: Request):
 
     return {"status": "ok", "timers_cancelled": 0,
             "note": "No active timers found for that thread + responder combination"}
+
+
+@app.post("/admin/trigger-weekly-report")
+async def trigger_weekly_report(background_tasks: BackgroundTasks):
+    """Manually trigger the weekly AI report (dev/backfill use)."""
+    from scheduler import job_weekly_report
+    background_tasks.add_task(job_weekly_report)
+    return {"status": "ok", "note": "Weekly report job queued in background"}
 
 
 @app.get("/")

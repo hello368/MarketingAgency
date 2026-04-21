@@ -3,9 +3,11 @@ Database layer — SQLite
 All persistent state lives here so Cloud Run restarts don't lose data.
 """
 import os
+import time
 import sqlite3
 import logging
 from datetime import datetime
+from threading import Lock
 from zoneinfo import ZoneInfo
 from config import TEAM_MEMBERS, TIMEZONE
 
@@ -104,6 +106,28 @@ def init_db():
             client           TEXT    DEFAULT '',
             city             TEXT    DEFAULT '',
             task_description TEXT    DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS wiki_pending (
+            id         TEXT    PRIMARY KEY,
+            payload    TEXT    NOT NULL,
+            created_at INTEGER NOT NULL,
+            user_id    TEXT    DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS wiki_awaiting_edit (
+            thread_id  TEXT    PRIMARY KEY,
+            pending_id TEXT    NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS spaces (
+            space_name    TEXT PRIMARY KEY,
+            display_name  TEXT NOT NULL,
+            space_type    TEXT DEFAULT '',
+            first_seen_at TEXT NOT NULL,
+            last_active   TEXT NOT NULL,
+            sla_enabled   INTEGER DEFAULT 1
         );
     """)
 
@@ -543,3 +567,62 @@ def close_task_nag_timer_for_assignee(thread_id: str, assignee_name: str) -> int
     con.commit()
     con.close()
     return count
+
+
+# ─────────────────────────────────────────
+# Spaces — multi-space SLA tracking
+# ─────────────────────────────────────────
+
+def upsert_space(space_name: str, display_name: str, space_type: str = "") -> None:
+    """Register a new space. INSERT OR IGNORE — existing spaces are a no-op (no write)."""
+    now = datetime.now(TZ).isoformat()
+    con = get_conn()
+    con.execute(
+        """INSERT OR IGNORE INTO spaces
+           (space_name, display_name, space_type, first_seen_at, last_active)
+           VALUES (?, ?, ?, ?, ?)""",
+        (space_name, display_name, space_type, now, now),
+    )
+    con.commit()
+    con.close()
+
+
+def get_all_spaces() -> list[sqlite3.Row]:
+    """Return all registered spaces."""
+    con = get_conn()
+    rows = con.execute("SELECT * FROM spaces ORDER BY last_active DESC").fetchall()
+    con.close()
+    return rows
+
+
+# ── touch_space in-memory write-back cache ──────────────────────────────────
+# Batches last_active updates so every webhook message doesn't hit SQLite.
+# flush_touch_cache() drains to DB; called by _flush_loop every 60s + at shutdown.
+_touch_cache: dict[str, float] = {}
+_touch_lock = Lock()
+
+
+def touch_space(space_name: str) -> None:
+    """Record last_active in memory. Flushed to SQLite by flush_touch_cache()."""
+    with _touch_lock:
+        _touch_cache[space_name] = time.time()
+
+
+def flush_touch_cache() -> int:
+    """Batch-write cached last_active timestamps to SQLite. Returns row count."""
+    with _touch_lock:
+        snapshot = dict(_touch_cache)
+        _touch_cache.clear()
+    if not snapshot:
+        return 0
+    con = get_conn()
+    con.executemany(
+        "UPDATE spaces SET last_active=? WHERE space_name=?",
+        [
+            (datetime.fromtimestamp(ts, tz=TZ).isoformat(), name)
+            for name, ts in snapshot.items()
+        ],
+    )
+    con.commit()
+    con.close()
+    return len(snapshot)
