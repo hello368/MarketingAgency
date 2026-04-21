@@ -3,6 +3,8 @@ Agency Remote Tracking System — Team Configuration
 Edit this file to update team members, roles, and settings.
 """
 
+import os
+
 # ─────────────────────────────────────────
 # TEAM MEMBERS
 # Keys must match exactly the Display Name in Google Chat.
@@ -53,18 +55,21 @@ DAILY_REPORT_SPACE_KEYWORD = "daily report"
 
 # ─────────────────────────────────────────
 # SLA TIMER
-# SLA_SECONDS = 15  → testing mode (15-second countdown)
-# SLA_SECONDS = 900 → production mode (15 minutes)
-# Change this one value to flip between test and prod.
+# Default 900s (15min) for production. Override via env var.
 # ─────────────────────────────────────────
 SLA_MINUTES = 15          # kept for legacy references
-SLA_SECONDS = 15          # ← TESTING: set to 900 for production
+SLA_SECONDS = int(os.getenv("SLA_SECONDS", "900"))
 
 # ─────────────────────────────────────────
 # TASK NAG ESCALATION INTERVALS
-# Testing : 15s / 30s / 45s
-# Production: 900s (15m) / 1800s (30m) / 2700s (45m)
+# Override via env: NAG_L1_SECONDS, NAG_L2_SECONDS, NAG_L3_SECONDS
+# Defaults: 900s (15m) / 1800s (30m) / 2700s (45m)
 # ─────────────────────────────────────────
-NAG_L1_SECONDS = 900   # 15 min
-NAG_L2_SECONDS = 1800  # 30 min
-NAG_L3_SECONDS = 2700  # 45 min
+NAG_L1_SECONDS = int(os.getenv("NAG_L1_SECONDS", "900"))   # 15 min
+NAG_L2_SECONDS = int(os.getenv("NAG_L2_SECONDS", "1800"))  # 30 min
+NAG_L3_SECONDS = int(os.getenv("NAG_L3_SECONDS", "2700"))  # 45 min
+
+# ─────────────────────────────────────────
+# BRAIN WIKI — Google Sheet Tab Names
+# ─────────────────────────────────────────
+TAB_CLIENT_WIKI = "Client_Wiki"
