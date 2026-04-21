@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request, BackgroundTasks, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
@@ -55,6 +55,19 @@ from wiki.validator import WikiValidator
 _wiki_interceptor: WikiInterceptor | None = None
 _wiki_validator:   WikiValidator   | None = None
 _wiki_router:      WikiModelRouter | None = None
+
+# ─────────────────────────────────────────
+# Admin auth
+# ─────────────────────────────────────────
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+
+
+def _verify_admin(x_admin_token: str = Header(None)):
+    if not ADMIN_TOKEN:
+        raise HTTPException(503, detail="Admin disabled (ADMIN_TOKEN not set)")
+    if x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(401, detail="Invalid token")
+
 
 # ─────────────────────────────────────────
 # Startup
@@ -814,9 +827,14 @@ async def test_reply(request: Request):
 
 
 @app.post("/admin/trigger-weekly-report")
-async def trigger_weekly_report(background_tasks: BackgroundTasks, overwrite: bool = False):
+async def trigger_weekly_report(
+    background_tasks: BackgroundTasks,
+    overwrite: bool = False,
+    _: None = Depends(_verify_admin),
+):
     """Manually trigger the weekly AI report.
 
+    Requires X-Admin-Token header matching ADMIN_TOKEN env var.
     ?overwrite=true  — re-write existing Week_Label row in the sheet instead of skipping.
     """
     from scheduler import job_weekly_report
