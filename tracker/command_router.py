@@ -212,6 +212,25 @@ def _get_tasks_for(assignee_raw: str) -> list[dict]:
         return []
 
 
+def _get_active_assignees() -> list[str]:
+    """Return sorted unique assignee names that have active tasks."""
+    try:
+        ws   = _get_or_create_tab(TAB_TASKS, _TASK_HEADERS)
+        rows = ws.get_all_records(expected_headers=list(_TASK_HEADERS))
+        seen: set[str] = set()
+        names: list[str] = []
+        for r in rows:
+            if str(r.get("상태", "")).replace(" ", "") in ("진행중",):
+                name = str(r.get("담당자", "")).strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        return sorted(names)
+    except Exception as exc:
+        log.warning("[Router] get_active_assignees failed: %s", exc)
+        return []
+
+
 # ── Text parsing helpers ──────────────────────────────────────────────────────
 _BOT_MENTION_RE = re.compile(
     r'@' + re.escape(BOT_NAME) + r'\b', re.IGNORECASE
@@ -315,9 +334,15 @@ def dispatch(body: dict) -> str | None:
     # ── 5. check ─────────────────────────────────────────────────────────────
     if lower.startswith("check"):
         after     = remainder[len("check"):].strip()
-        assignees = _human_mentions(message) or _names_from_text(after)
+        assignees = (
+            _human_mentions(message)
+            or _names_from_text(after)
+            or ([after.lstrip("@").strip()] if after.strip() else [])
+        )
         if not assignees:
-            return "❓ Please mention an assignee. e.g. `@best check @Nicko`"
+            known = _get_active_assignees()
+            hint  = "\n*Known assignees:* " + ", ".join(known) if known else ""
+            return f"❓ Usage: `@best check Ivan` or `@best check @Ivan`{hint}"
         try:
             all_tasks: list[dict] = []
             for name in assignees:
@@ -328,7 +353,9 @@ def dispatch(body: dict) -> str | None:
 
         names_str = ", ".join(assignees)
         if not all_tasks:
-            return f"✅ No active tasks for *{names_str}*."
+            known = _get_active_assignees()
+            hint  = "\n*Known assignees:* " + ", ".join(known) if known else ""
+            return f"✅ No active tasks for *{names_str}*.{hint}"
 
         lines = [f"📋 Active tasks for *{names_str}*:\n"]
         for i, t in enumerate(all_tasks, 1):
