@@ -233,6 +233,12 @@ def job_task_nag_check():
     task_tracker.check_and_fire_nag_alerts()
 
 
+def job_focus_check():
+    """Check focus mode timers: fire 45-min check-in or resume nag alerts on no-reply."""
+    import task_tracker
+    task_tracker.check_and_fire_focus_checks()
+
+
 def create_scheduler() -> BackgroundScheduler:
     scheduler = BackgroundScheduler(timezone=TZ)
 
@@ -263,6 +269,10 @@ def create_scheduler() -> BackgroundScheduler:
     # Task nag check — same 15s cadence, separate job for clean separation.
     scheduler.add_job(
         job_task_nag_check, "interval", seconds=15, id="task_nag_check", replace_existing=True
+    )
+    # Focus mode check — fires 45-min check-in questions and resumes nags on no-reply.
+    scheduler.add_job(
+        job_focus_check, "interval", seconds=15, id="focus_check", replace_existing=True
     )
 
     return scheduler

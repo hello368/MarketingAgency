@@ -53,7 +53,11 @@ def send_message(space_name: str, text: str) -> dict:
 
 
 def reply_to_thread(space_name: str, thread_name: str, text: str) -> dict:
-    """Reply inside an existing thread."""
+    """Reply inside an existing thread.
+
+    messageReplyOption ensures the message is posted as a thread reply rather
+    than a new top-level message when the thread.name is provided.
+    """
     token = _get_token()
     url = f"{_CHAT_API}/{space_name}/messages"
     payload = {
@@ -63,10 +67,16 @@ def reply_to_thread(space_name: str, thread_name: str, text: str) -> dict:
     with httpx.Client(timeout=15) as client:
         resp = client.post(
             url,
+            params={"messageReplyOption": "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"},
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json=payload,
         )
     if resp.status_code != 200:
         log.error("Google Chat reply failed: %s %s", resp.status_code, resp.text)
         return {}
-    return resp.json()
+    data = resp.json()
+    log.info(
+        "Thread reply sent — space=%s thread=%s reply_thread=%s",
+        space_name, thread_name, data.get("thread", {}).get("name"),
+    )
+    return data

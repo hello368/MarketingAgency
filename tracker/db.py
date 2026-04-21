@@ -95,6 +95,7 @@ def init_db():
             thread_id        TEXT    NOT NULL,
             space_name       TEXT    NOT NULL,
             assignee         TEXT    NOT NULL,
+            google_chat_id   TEXT    DEFAULT '',
             nag_level        INTEGER DEFAULT 0,
             acknowledged     INTEGER DEFAULT 0,
             deadline_l1      TEXT    NOT NULL,
@@ -106,8 +107,17 @@ def init_db():
         );
     """)
 
-    # Migrate existing task_nag_timers table — add task detail columns if absent
-    for col in ("client TEXT DEFAULT ''", "city TEXT DEFAULT ''", "task_description TEXT DEFAULT ''"):
+    # Migrate existing task_nag_timers table — add new columns if absent
+    for col in (
+        "client TEXT DEFAULT ''",
+        "city TEXT DEFAULT ''",
+        "task_description TEXT DEFAULT ''",
+        "google_chat_id TEXT DEFAULT ''",
+        "focus_mode INTEGER DEFAULT 0",
+        "focus_deadline TEXT DEFAULT ''",
+        "focus_check_sent INTEGER DEFAULT 0",
+        "focus_no_reply_deadline TEXT DEFAULT ''",
+    ):
         col_name = col.split()[0]
         try:
             con.execute(f"ALTER TABLE task_nag_timers ADD COLUMN {col}")
@@ -350,15 +360,16 @@ def create_task_nag_timer(
     thread_id: str, space_name: str, assignee: str,
     deadline_l1: str, deadline_l2: str, deadline_l3: str,
     client: str = "", city: str = "", task_description: str = "",
+    google_chat_id: str = "",
 ) -> int:
     con = get_conn()
     cur = con.execute(
         """INSERT INTO task_nag_timers
-           (created_at, thread_id, space_name, assignee,
+           (created_at, thread_id, space_name, assignee, google_chat_id,
             deadline_l1, deadline_l2, deadline_l3,
             client, city, task_description)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
-        (datetime.now(TZ).isoformat(), thread_id, space_name, assignee,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (datetime.now(TZ).isoformat(), thread_id, space_name, assignee, google_chat_id,
          deadline_l1, deadline_l2, deadline_l3,
          client, city, task_description),
     )
@@ -373,6 +384,7 @@ def get_expired_nag_timers(now_iso: str) -> list[sqlite3.Row]:
     Return timers that need their next escalation level fired.
     Each row includes a 'nag_level' field = the level that should be fired now
     (1, 2, or 3 — the one whose deadline has passed but hasn't been sent yet).
+    Timers in focus_mode are excluded — they use a separate check path.
     """
     con = get_conn()
     rows = con.execute(
@@ -385,6 +397,7 @@ def get_expired_nag_timers(now_iso: str) -> list[sqlite3.Row]:
                END AS next_level
            FROM task_nag_timers
            WHERE acknowledged = 0
+             AND focus_mode = 0
              AND nag_level < 3
              AND deadline_l1 <= :now""",
         {"now": now_iso},
@@ -399,6 +412,88 @@ def get_expired_nag_timers(now_iso: str) -> list[sqlite3.Row]:
             d["nag_level"] = level
             result.append(d)
     return result
+
+
+def enter_focus_mode(thread_id: str, assignee: str, focus_deadline_iso: str) -> int:
+    """Set focus_mode=1 on active timers for this assignee in the thread. Returns row count."""
+    con = get_conn()
+    cur = con.execute(
+        """UPDATE task_nag_timers
+           SET focus_mode=1, focus_deadline=?, focus_check_sent=0, focus_no_reply_deadline=''
+           WHERE thread_id=? AND lower(assignee)=lower(?) AND acknowledged=0 AND focus_mode=0""",
+        (focus_deadline_iso, thread_id, assignee),
+    )
+    count = cur.rowcount
+    con.commit()
+    con.close()
+    return count
+
+
+def get_timers_needing_focus_check(now_iso: str) -> list[dict]:
+    """Return focus timers whose 45-min deadline has passed but check message not yet sent."""
+    con = get_conn()
+    rows = con.execute(
+        """SELECT * FROM task_nag_timers
+           WHERE focus_mode=1 AND focus_check_sent=0 AND acknowledged=0
+             AND focus_deadline != '' AND focus_deadline <= ?""",
+        (now_iso,),
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+def mark_focus_check_sent(timer_id: int, no_reply_deadline_iso: str) -> None:
+    """Record that the 45-min check message was sent and set the 10-min no-reply deadline."""
+    con = get_conn()
+    con.execute(
+        "UPDATE task_nag_timers SET focus_check_sent=1, focus_no_reply_deadline=? WHERE id=?",
+        (no_reply_deadline_iso, timer_id),
+    )
+    con.commit()
+    con.close()
+
+
+def snooze_focus_timer(thread_id: str, assignee: str, new_focus_deadline_iso: str) -> int:
+    """Reset the 45-min focus timer (user replied 'still working'). Returns row count."""
+    con = get_conn()
+    cur = con.execute(
+        """UPDATE task_nag_timers
+           SET focus_deadline=?, focus_check_sent=0, focus_no_reply_deadline=''
+           WHERE thread_id=? AND lower(assignee)=lower(?) AND focus_mode=1 AND acknowledged=0""",
+        (new_focus_deadline_iso, thread_id, assignee),
+    )
+    count = cur.rowcount
+    con.commit()
+    con.close()
+    return count
+
+
+def get_timers_focus_no_reply(now_iso: str) -> list[dict]:
+    """Return focus timers where the 10-min no-reply window has expired."""
+    con = get_conn()
+    rows = con.execute(
+        """SELECT * FROM task_nag_timers
+           WHERE focus_mode=1 AND focus_check_sent=1 AND acknowledged=0
+             AND focus_no_reply_deadline != '' AND focus_no_reply_deadline <= ?""",
+        (now_iso,),
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+def exit_focus_resume_nag(timer_id: int, now_iso: str) -> None:
+    """Exit focus mode and force-escalate to L3 on the next nag check tick."""
+    con = get_conn()
+    con.execute(
+        """UPDATE task_nag_timers
+           SET focus_mode=0, focus_check_sent=0, focus_no_reply_deadline='',
+               nag_level=CASE WHEN nag_level < 2 THEN 2 ELSE nag_level END,
+               deadline_l3=?
+           WHERE id=?""",
+        (now_iso, timer_id),
+    )
+    con.commit()
+    con.close()
 
 
 def mark_nag_level_sent(timer_id: int, level: int) -> None:
@@ -435,3 +530,16 @@ def close_task_nag_timers(thread_id: str) -> None:
     )
     con.commit()
     con.close()
+
+
+def close_task_nag_timer_for_assignee(thread_id: str, assignee_name: str) -> int:
+    """Acknowledge nag timers for one assignee only (partial task completion)."""
+    con = get_conn()
+    cur = con.execute(
+        "UPDATE task_nag_timers SET acknowledged=1 WHERE thread_id=? AND lower(assignee)=lower(?)",
+        (thread_id, assignee_name),
+    )
+    count = cur.rowcount
+    con.commit()
+    con.close()
+    return count

@@ -24,7 +24,8 @@ _SCOPES = [
 ]
 
 # ── Timezone for timestamps
-_TZ = ZoneInfo(os.environ.get("TIMEZONE", "Asia/Manila"))
+_TZ     = ZoneInfo(os.environ.get("TIMEZONE", "Asia/Manila"))
+_TZ_PST = ZoneInfo("America/Los_Angeles")   # for Last Active (PST/PDT)
 
 # ── All 12 team members (pre-populated into Live Status tab)
 TEAM_MEMBERS = [
@@ -157,6 +158,21 @@ class GSheetHandler:
             value_input_option="USER_ENTERED",
         )
         log.info("[GSheet] ✅ %s → '%s' at %s", name, status, now_str)
+        return True
+
+    def update_last_active(self, name: str, ts: str | None = None) -> bool:
+        """
+        Update only the Last Active timestamp (col C).
+        Pass ts to record an exact completion timestamp; omit to use current PST time.
+        Does NOT change their Status (col B).
+        """
+        row_idx = self._find_row(name)
+        if row_idx is None:
+            log.debug("[GSheet] update_last_active: '%s' not found in Live Status.", name)
+            return False
+        now_str = ts if ts else datetime.now(_TZ_PST).strftime("%Y-%m-%d %H:%M:%S")
+        self._ws.update([[now_str]], f"C{row_idx}", value_input_option="USER_ENTERED")
+        log.info("[GSheet] Last Active — %s @ %s PST", name, now_str)
         return True
 
     def get_all_statuses(self) -> list[dict]:

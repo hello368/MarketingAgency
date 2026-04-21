@@ -308,15 +308,31 @@ def _handle_message(body: dict) -> None:
     if matched_name and sender_google_id:
         db.upsert_google_chat_id(matched_name, sender_google_id, sender_display)
 
-    # ── Task Nag: cancel timer if the assignee sends any reply in the task thread
+    # ── Live Status: update Last Active (col C) for every message from a known member
+    if matched_name and state.gsheet:
+        try:
+            state.gsheet.update_last_active(matched_name)
+        except Exception as _la_err:
+            log.debug("[GSheet] update_last_active silenced for %s: %s", matched_name, _la_err)
+
+    # ── Task Nag: cancel timer on any reply, BUT skip when ACK/snooze keywords
+    # are present — those are handled inside process_task_message (focus mode).
     if thread_key and matched_name:
-        task_tracker.acknowledge_nag_timers(thread_key, matched_name)
+        if not task_tracker.is_acknowledgment(text) and not task_tracker.is_snooze(text):
+            task_tracker.acknowledge_nag_timers(thread_key, matched_name)
 
     # ── [1] TASK TRACKER — highest priority, checked before everything else
     task_reply = task_tracker.process_task_message(body)
     if task_reply:
         if space_name and thread_key:
+            # Thread-First: always reply inside the original task thread so the
+            # full lifecycle (Registration → OK → Done) stays in one place.
             gchat_sender.reply_to_thread(space_name, thread_key, task_reply["text"])
+        else:
+            log.error(
+                "[GChat] Task reply dropped — missing thread context: space=%r thread=%r text=%.80s",
+                space_name, thread_key, task_reply["text"],
+            )
         return
 
     # ── Date reset (daily thread keys expire at midnight)
