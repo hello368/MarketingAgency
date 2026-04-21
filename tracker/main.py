@@ -9,7 +9,7 @@ Endpoints:
 import os
 import re
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import time
 import asyncio
 import logging
