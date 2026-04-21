@@ -826,6 +826,28 @@ async def test_reply(request: Request):
             "note": "No active timers found for that thread + responder combination"}
 
 
+@app.post("/admin/spaces/{space_name:path}/sla")
+async def toggle_space_sla(
+    space_name: str,
+    enabled: bool,
+    _: None = Depends(_verify_admin),
+):
+    """Enable or disable SLA nag alerts for a space.
+
+    Query param: ?enabled=true|false
+    Header: X-Admin-Token required.
+    """
+    before = db.get_sla_enabled(space_name)
+    if before is None:
+        raise HTTPException(404, detail=f"Space not found: {space_name}")
+    db.set_sla_enabled(space_name, enabled)
+    log.info(
+        "[admin] SLA toggle — space=%s before=%s after=%s",
+        space_name, before, enabled,
+    )
+    return {"space_name": space_name, "sla_enabled": enabled, "previous": before}
+
+
 @app.post("/admin/trigger-weekly-report")
 async def trigger_weekly_report(
     background_tasks: BackgroundTasks,

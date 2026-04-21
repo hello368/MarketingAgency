@@ -127,7 +127,14 @@ def init_db():
             space_type    TEXT DEFAULT '',
             first_seen_at TEXT NOT NULL,
             last_active   TEXT NOT NULL,
-            sla_enabled   INTEGER DEFAULT 1
+            sla_enabled   INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS find_task_row_stats (
+            date     TEXT    NOT NULL,
+            strategy INTEGER NOT NULL,
+            count    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, strategy)
         );
     """)
 
@@ -347,12 +354,17 @@ def resolve_sla_timer(thread_key: str, responder_google_id: str) -> list[sqlite3
 
 
 def get_expired_sla_timers() -> list[sqlite3.Row]:
-    """Return unresolved timers past their deadline, not yet pinged."""
+    """Return unresolved timers past their deadline, not yet pinged.
+    Only returns timers for spaces where sla_enabled = 1.
+    """
     now_iso = datetime.now(TZ).isoformat()
     con = get_conn()
     rows = con.execute(
-        """SELECT * FROM sla_timers
-           WHERE resolved=0 AND telegram_pinged=0 AND deadline <= ?""",
+        """SELECT t.* FROM sla_timers t
+           JOIN spaces s ON t.space_name = s.space_name
+           WHERE t.resolved=0 AND t.telegram_pinged=0
+             AND t.deadline <= ?
+             AND s.sla_enabled = 1""",
         (now_iso,),
     ).fetchall()
     con.close()
@@ -606,6 +618,63 @@ def touch_space(space_name: str) -> None:
     """Record last_active in memory. Flushed to SQLite by flush_touch_cache()."""
     with _touch_lock:
         _touch_cache[space_name] = time.time()
+
+
+def get_sla_enabled(space_name: str) -> bool | None:
+    """Return sla_enabled for a space, or None if the space does not exist."""
+    con = get_conn()
+    row = con.execute(
+        "SELECT sla_enabled FROM spaces WHERE space_name=?", (space_name,)
+    ).fetchone()
+    con.close()
+    return bool(row["sla_enabled"]) if row is not None else None
+
+
+def set_sla_enabled(space_name: str, enabled: bool) -> bool:
+    """Update sla_enabled for an existing space. Returns False if space not found."""
+    con = get_conn()
+    cur = con.execute(
+        "UPDATE spaces SET sla_enabled=? WHERE space_name=?",
+        (1 if enabled else 0, space_name),
+    )
+    affected = cur.rowcount
+    con.commit()
+    con.close()
+    return affected > 0
+
+
+# ─────────────────────────────────────────
+# _find_task_row match statistics
+# ─────────────────────────────────────────
+
+def record_find_task_row_match(strategy: int) -> None:
+    """Record a match (or no-match with strategy=0) for today.
+    strategy: 0 = no match, 1-6 = matched strategy number.
+    """
+    from datetime import date as _date
+    today = _date.today().isoformat()
+    con = get_conn()
+    con.execute(
+        """INSERT INTO find_task_row_stats (date, strategy, count)
+           VALUES (?, ?, 1)
+           ON CONFLICT(date, strategy) DO UPDATE SET count = count + 1""",
+        (today, strategy),
+    )
+    con.commit()
+    con.close()
+
+
+def get_find_task_row_stats(days: int = 14) -> list[sqlite3.Row]:
+    """Return per-(date, strategy) counts for the last N days."""
+    con = get_conn()
+    rows = con.execute(
+        """SELECT date, strategy, count FROM find_task_row_stats
+           WHERE date >= date('now', ?)
+           ORDER BY date DESC, strategy""",
+        (f"-{days} days",),
+    ).fetchall()
+    con.close()
+    return rows
 
 
 def flush_touch_cache() -> int:
