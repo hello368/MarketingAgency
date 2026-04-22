@@ -40,6 +40,7 @@ from config import (
     CHECKIN_WINDOW_START, CHECKIN_WINDOW_END,
     EOD_WINDOW_START, EOD_WINDOW_END,
     SLA_SECONDS,
+    CHAT_ARCHIVE_ENABLED,
 )
 from gsheet_handler import GSheetHandler
 import ai_engine
@@ -547,27 +548,28 @@ def _handle_message(body: dict) -> None:
         return  # Track A: command handled — skip Chat_Archive
 
     # ── [2] CHAT ARCHIVE — Track B: non-command messages only
-    try:
-        _attachments = message.get("attachment") or message.get("attachments") or []
-        _msg_type, _, _file_link = _classify_message(text, _attachments)
-        _link = _file_link or message.get("name") or ""
+    if CHAT_ARCHIVE_ENABLED:
+        try:
+            _attachments = message.get("attachment") or message.get("attachments") or []
+            _msg_type, _, _file_link = _classify_message(text, _attachments)
+            _link = _file_link or message.get("name") or ""
 
-        # Generate 3-word content summary when message has a URL or file attachment
-        _summary = ""
-        if _msg_type != "Text" and _wiki_router is not None:
-            _url_list = [u for u in _file_link.split("; ") if u] if _file_link else []
-            _summary = _wiki_router.summarize_content(text, _url_list)
+            # Generate 3-word content summary when message has a URL or file attachment
+            _summary = ""
+            if _msg_type != "Text" and _wiki_router is not None:
+                _url_list = [u for u in _file_link.split("; ") if u] if _file_link else []
+                _summary = _wiki_router.summarize_content(text, _url_list)
 
-        sheets_client.log_chat_archive(
-            timestamp = now_local.strftime("%Y-%m-%d %H:%M:%S"),
-            space     = space_display,
-            user      = sender_display,
-            message   = text,
-            link      = _link,
-            summary   = _summary,
-        )
-    except Exception as _arc_err:
-        log.debug("[Archive] Silent log suppressed: %s", _arc_err)
+            sheets_client.log_chat_archive(
+                timestamp = now_local.strftime("%Y-%m-%d %H:%M:%S"),
+                space     = space_display,
+                user      = sender_display,
+                message   = text,
+                link      = _link,
+                summary   = _summary,
+            )
+        except Exception as _arc_err:
+            log.debug("[Archive] Silent log suppressed: %s", _arc_err)
 
     # ── Date reset (daily thread keys expire at midnight)
     checkin_thread_key = db.get_state("checkin_thread_key")

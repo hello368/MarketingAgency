@@ -79,6 +79,13 @@ MODEL_SMART        = os.getenv("MODEL_SMART",        "anthropic/claude-sonnet-4.
 MODEL_LONG_CONTEXT = os.getenv("MODEL_LONG_CONTEXT", MODEL_SMART)
 
 # ─────────────────────────────────────────
+# FEATURE FLAGS
+# ─────────────────────────────────────────
+# Logs all non-command messages to Chat_Archive sheet. Off by default
+# (no PII filtering). Enable via env var when ready.
+CHAT_ARCHIVE_ENABLED = os.getenv("CHAT_ARCHIVE_ENABLED", "false").lower() == "true"
+
+# ─────────────────────────────────────────
 # BRAIN WIKI — Google Sheet Tab Names
 # ─────────────────────────────────────────
 TAB_CLIENT_WIKI = "Client_Wiki"
