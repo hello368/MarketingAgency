@@ -152,7 +152,7 @@ Write in the following format, under 200 words:
 
     client = _get_client()
     if not client:
-        return "⚠️ LLM unavailable (OPENROUTER_API_KEY not set)."
+        return "⚠️ Brief failed: OPENROUTER_API_KEY not set."
     try:
         msgs: list[dict] = [
             {"role": "system", "content": system},
@@ -164,7 +164,10 @@ Write in the following format, under 200 words:
             max_tokens=600,
             temperature=0.3,
         )
-        return resp.choices[0].message.content.strip()
+        result = resp.choices[0].message.content.strip()
+        if not result:
+            return "⚠️ Brief returned empty response."
+        return result
     except Exception as exc:
         log.warning("[LLM] generate_brief failed — model=%s %s: %s", MODEL_SMART, type(exc).__name__, exc)
-        return f"⚠️ Failed to generate briefing ({type(exc).__name__})."
+        return f"⚠️ Brief failed: {type(exc).__name__}."
