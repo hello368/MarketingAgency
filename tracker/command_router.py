@@ -340,7 +340,9 @@ def dispatch(body: dict) -> str | None:
             or ([after.lstrip("@").strip()] if after.strip() else [])
         )
         if not assignees:
-            return "❓ Usage: `@best check Ivan` or `@best check @Ivan`"
+            known = _get_active_assignees()
+            hint  = "\n*Known assignees:* " + ", ".join(known) if known else ""
+            return f"❓ Usage: `@best check Ivan` or `@best check @Ivan`{hint}"
         try:
             all_tasks: list[dict] = []
             for name in assignees:
@@ -351,7 +353,9 @@ def dispatch(body: dict) -> str | None:
 
         names_str = ", ".join(assignees)
         if not all_tasks:
-            return f"✅ No active tasks for *{names_str}*."
+            known = _get_active_assignees()
+            hint  = "\n*Known assignees:* " + ", ".join(known) if known else ""
+            return f"✅ No active tasks for *{names_str}*.{hint}"
 
         lines = [f"📋 Active tasks for *{names_str}*:\n"]
         for i, t in enumerate(all_tasks, 1):
