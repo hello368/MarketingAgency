@@ -74,8 +74,8 @@ NAG_L3_SECONDS = int(os.getenv("NAG_L3_SECONDS", "2700"))  # 45 min
 # Fast: lightweight tasks (update summary, check)
 # Smart: reasoning-heavy tasks (ask RAG, brief)
 # ─────────────────────────────────────────
-MODEL_FAST         = os.getenv("MODEL_FAST",         "anthropic/claude-haiku-4.5")
-MODEL_SMART        = os.getenv("MODEL_SMART",        "anthropic/claude-sonnet-4.6")
+MODEL_FAST         = os.getenv("MODEL_FAST",         "deepseek/deepseek-chat")
+MODEL_SMART        = os.getenv("MODEL_SMART",        "deepseek/deepseek-chat")
 MODEL_LONG_CONTEXT = os.getenv("MODEL_LONG_CONTEXT", MODEL_SMART)
 
 # ─────────────────────────────────────────
